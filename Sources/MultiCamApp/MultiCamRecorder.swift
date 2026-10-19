@@ -3,45 +3,138 @@ import AVFoundation
 import Photos
 import UIKit
 
+// Independent thread-safe recorder for a single camera stream
+class SingleStreamRecorder {
+    let name: String
+    private var writer: AVAssetWriter?
+    private var input: AVAssetWriterInput?
+    private var isSessionStarted = false
+    private(set) var outputURL: URL?
+
+    init(name: String) {
+        self.name = name
+    }
+
+    func prepare(width: Int, height: Int) -> Bool {
+        let tempDir = FileManager.default.temporaryDirectory
+        let url = tempDir.appendingPathComponent("\(name)_\(Int(Date().timeIntervalSince1970))_\(UUID().uuidString.prefix(4)).mp4")
+        try? FileManager.default.removeItem(at: url)
+        self.outputURL = url
+        self.isSessionStarted = false
+
+        let settings: [String: Any] = [
+            AVVideoCodecKey: AVVideoCodecType.h264,
+            AVVideoWidthKey: width,
+            AVVideoHeightKey: height,
+            AVVideoCompressionPropertiesKey: [
+                AVVideoAverageBitRateKey: 6_000_000
+            ]
+        ]
+
+        do {
+            let w = try AVAssetWriter(outputURL: url, fileType: .mp4)
+            let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
+            inp.expectsMediaDataInRealTime = true
+            // Rotate landscape sensor buffer to portrait
+            inp.transform = CGAffineTransform(rotationAngle: .pi / 2)
+
+            if w.canAdd(inp) {
+                w.add(inp)
+            }
+            if w.startWriting() {
+                self.writer = w
+                self.input = inp
+                return true
+            }
+        } catch {
+            print("\(name) writer error: \(error)")
+        }
+        return false
+    }
+
+    func append(_ sampleBuffer: CMSampleBuffer) {
+        guard let writer = writer, writer.status == .writing, let input = input else { return }
+
+        if !isSessionStarted {
+            let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
+            writer.startSession(atSourceTime: pts)
+            isSessionStarted = true
+        }
+
+        if input.isReadyForMoreMediaData {
+            input.append(sampleBuffer)
+        }
+    }
+
+    func finish(completion: @escaping (URL?) -> Void) {
+        guard let writer = writer else {
+            completion(nil)
+            return
+        }
+
+        // If no frames were ever written, cancel cleanly instead of crashing finishWriting()
+        guard isSessionStarted, writer.status == .writing else {
+            writer.cancelWriting()
+            self.writer = nil
+            self.input = nil
+            completion(nil)
+            return
+        }
+
+        input?.markAsFinished()
+        let url = self.outputURL
+        writer.finishWriting {
+            let success = (writer.status == .completed)
+            self.writer = nil
+            self.input = nil
+            completion(success ? url : nil)
+        }
+    }
+}
+
 class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
-    @Published var statusMessage = "Tap 'Start Cameras' to begin"
-    
+    @Published var statusMessage = "Initializing 3 Rear Cameras..."
+
     let session = AVCaptureMultiCamSession()
     private let sessionQueue = DispatchQueue(label: "multicam.session.queue")
     private let dataOutputQueue = DispatchQueue(label: "multicam.data.queue")
-    
-    let backPreviewView = PreviewView()
-    let frontPreviewView = PreviewView()
-    
-    private var backDataOutput: AVCaptureVideoDataOutput?
-    private var frontDataOutput: AVCaptureVideoDataOutput?
-    
-    private var backAssetWriter: AVAssetWriter?
-    private var frontAssetWriter: AVAssetWriter?
-    private var backWriterInput: AVAssetWriterInput?
-    private var frontWriterInput: AVAssetWriterInput?
-    
-    private var backOutputURL: URL?
-    private var frontOutputURL: URL?
-    private var isWritingStarted = false
+
+    // 3 Preview Views: Top (Telephoto), Middle (Main Wide), Bottom (Ultra-Wide)
+    let telePreviewView = PreviewView()
+    let widePreviewView = PreviewView()
+    let ultraWidePreviewView = PreviewView()
+
+    private var teleDataOutput: AVCaptureVideoDataOutput?
+    private var wideDataOutput: AVCaptureVideoDataOutput?
+    private var ultraWideDataOutput: AVCaptureVideoDataOutput?
+
+    private let teleRecorder = SingleStreamRecorder(name: "1_Telephoto")
+    private let wideRecorder = SingleStreamRecorder(name: "2_MainWide")
+    private let ultraRecorder = SingleStreamRecorder(name: "3_UltraWide")
+
+    private var activeStreamCount = 0
     private var isConfigured = false
-    
+
     override init() {
         super.init()
     }
-    
+
     func startCameraSetup() {
         guard !isConfigured else { return }
-        statusMessage = "Checking permissions..."
-        
-        // Link preview layers on Main Thread BEFORE touching background queue
-        backPreviewView.videoPreviewLayer.setSessionWithNoConnection(session)
-        frontPreviewView.videoPreviewLayer.setSessionWithNoConnection(session)
-        backPreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
-        frontPreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
-        
+
+        telePreviewView.videoPreviewLayer.setSessionWithNoConnection(session)
+        widePreviewView.videoPreviewLayer.setSessionWithNoConnection(session)
+        ultraWidePreviewView.videoPreviewLayer.setSessionWithNoConnection(session)
+
+        telePreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
+        widePreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
+        ultraWidePreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
+
+        // Pre-request both Camera and Photos permissions upfront so stopping never crashes
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { _ in }
+
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             setupSession()
@@ -50,32 +143,40 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 if granted {
                     self.setupSession()
                 } else {
-                    DispatchQueue.main.async {
-                        self.statusMessage = "Camera permission denied."
-                    }
+                    DispatchQueue.main.async { self.statusMessage = "Camera permission denied." }
                 }
             }
         default:
-            DispatchQueue.main.async {
-                self.statusMessage = "Camera permission denied in Settings."
-            }
+            DispatchQueue.main.async { self.statusMessage = "Camera permission denied in Settings." }
         }
     }
-    
-    private func configureMultiCamFormat(for device: AVCaptureDevice) -> Bool {
-        // Find a 1080p format that explicitly supports MultiCam
-        let supportedFormats = device.formats.filter { format in
-            let dimensions = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
-            return format.isMultiCamSupported && dimensions.width == 1920 && dimensions.height == 1080
+
+    // Selects a low-bandwidth MultiCam format (prefers binned 720p/1080p) so all 3 rear cameras fit under hardwareCost 1.0
+    private func configureLowCostMultiCamFormat(for device: AVCaptureDevice, prefer720p: Bool) -> Bool {
+        let multiCamFormats = device.formats.filter { $0.isMultiCamSupported }
+        guard !multiCamFormats.isEmpty else { return false }
+
+        let targetWidth: Int32 = prefer720p ? 1280 : 1920
+        let targetHeight: Int32 = prefer720p ? 720 : 1080
+
+        let matchingFormats = multiCamFormats.filter { format in
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return dims.width == targetWidth && dims.height == targetHeight && format.isVideoBinned
         }
-        
-        guard let bestFormat = supportedFormats.first ?? device.formats.first(where: { $0.isMultiCamSupported }) else {
+
+        let fallbackFormats = multiCamFormats.filter { format in
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            return dims.width == targetWidth && dims.height == targetHeight
+        }
+
+        guard let chosenFormat = matchingFormats.first ?? fallbackFormats.first ?? multiCamFormats.first else {
             return false
         }
-        
+
         do {
             try device.lockForConfiguration()
-            device.activeFormat = bestFormat
+            device.activeFormat = chosenFormat
+            // 30 fps cap to conserve ISP bandwidth across 3 sensors
             device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
             device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
@@ -84,199 +185,191 @@ class MultiCamRecorder: NSObject, ObservableObject {
             return false
         }
     }
-    
+
+    private func addRearCamera(
+        deviceType: AVCaptureDevice.DeviceType,
+        previewLayer: AVCaptureVideoPreviewLayer,
+        prefer720p: Bool
+    ) -> AVCaptureVideoDataOutput? {
+        guard let device = AVCaptureDevice.default(deviceType, for: .video, position: .back),
+              configureLowCostMultiCamFormat(for: device, prefer720p: prefer720p),
+              let input = try? AVCaptureDeviceInput(device: device),
+              session.canAddInput(input) else {
+            return nil
+        }
+
+        session.addInputWithNoConnections(input)
+
+        guard let port = input.ports(for: .video, sourceDeviceType: device.deviceType, sourceDevicePosition: .back).first
+                ?? input.ports.first(where: { $0.mediaType == .video }) else {
+            session.removeInput(input)
+            return nil
+        }
+
+        let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: previewLayer)
+        if session.canAddConnection(previewConn) {
+            session.addConnection(previewConn)
+        }
+
+        let dataOutput = AVCaptureVideoDataOutput()
+        dataOutput.alwaysDiscardsLateVideoFrames = true
+        dataOutput.setSampleBufferDelegate(self, queue: dataOutputQueue)
+
+        if session.canAddOutput(dataOutput) {
+            session.addOutputWithNoConnections(dataOutput)
+            let dataConn = AVCaptureConnection(inputPorts: [port], output: dataOutput)
+            if session.canAddConnection(dataConn) {
+                session.addConnection(dataConn)
+                return dataOutput
+            }
+        }
+
+        return nil
+    }
+
     private func setupSession() {
-        let backLayer = backPreviewView.videoPreviewLayer
-        let frontLayer = frontPreviewView.videoPreviewLayer
-        
+        let teleLayer = telePreviewView.videoPreviewLayer
+        let wideLayer = widePreviewView.videoPreviewLayer
+        let ultraLayer = ultraWidePreviewView.videoPreviewLayer
+
         sessionQueue.async {
             guard AVCaptureMultiCamSession.isMultiCamSupported else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Multi-cam not supported on this iPhone model."
+                    self.statusMessage = "Multi-cam not supported on this iPhone."
                 }
                 return
             }
-            
+
             var objcError: NSError?
             let success = ObjCExceptionCatcher.tryExecute({
                 self.session.beginConfiguration()
-                
-                // 1. Back Camera
-                guard let backDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-                      self.configureMultiCamFormat(for: backDevice),
-                      let backInput = try? AVCaptureDeviceInput(device: backDevice),
-                      self.session.canAddInput(backInput) else {
-                    DispatchQueue.main.async { self.statusMessage = "Back camera setup failed." }
-                    self.session.commitConfiguration()
-                    return
+
+                var count = 0
+
+                // 1. TOP: Telephoto Camera (720p binned to save ISP bandwidth)
+                if let out = self.addRearCamera(deviceType: .builtInTelephotoCamera, previewLayer: teleLayer, prefer720p: true) {
+                    self.teleDataOutput = out
+                    count += 1
                 }
-                self.session.addInputWithNoConnections(backInput)
-                
-                guard let backPort = backInput.ports(for: .video, sourceDeviceType: backDevice.deviceType, sourceDevicePosition: .back).first ?? backInput.ports.first else {
-                    DispatchQueue.main.async { self.statusMessage = "No back video port." }
-                    self.session.commitConfiguration()
-                    return
+
+                // 2. MIDDLE: Main Wide Camera (1080p binned)
+                if let out = self.addRearCamera(deviceType: .builtInWideAngleCamera, previewLayer: wideLayer, prefer720p: true) {
+                    self.wideDataOutput = out
+                    count += 1
                 }
-                
-                let backPreviewConn = AVCaptureConnection(inputPort: backPort, videoPreviewLayer: backLayer)
-                if self.session.canAddConnection(backPreviewConn) {
-                    self.session.addConnection(backPreviewConn)
+
+                // 3. BOTTOM: Ultra-Wide Camera (720p binned)
+                if let out = self.addRearCamera(deviceType: .builtInUltraWideCamera, previewLayer: ultraLayer, prefer720p: true) {
+                    self.ultraWideDataOutput = out
+                    count += 1
                 }
-                
-                let bOutput = AVCaptureVideoDataOutput()
-                bOutput.alwaysDiscardsLateVideoFrames = true
-                bOutput.setSampleBufferDelegate(self, queue: self.dataOutputQueue)
-                if self.session.canAddOutput(bOutput) {
-                    self.session.addOutputWithNoConnections(bOutput)
-                    self.backDataOutput = bOutput
-                    let backDataConn = AVCaptureConnection(inputPorts: [backPort], output: bOutput)
-                    if self.session.canAddConnection(backDataConn) {
-                        self.session.addConnection(backDataConn)
-                    }
-                }
-                
-                // 2. Front Camera
-                guard let frontDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
-                      self.configureMultiCamFormat(for: frontDevice),
-                      let frontInput = try? AVCaptureDeviceInput(device: frontDevice),
-                      self.session.canAddInput(frontInput) else {
-                    DispatchQueue.main.async { self.statusMessage = "Front camera setup failed." }
-                    self.session.commitConfiguration()
-                    return
-                }
-                self.session.addInputWithNoConnections(frontInput)
-                
-                guard let frontPort = frontInput.ports(for: .video, sourceDeviceType: frontDevice.deviceType, sourceDevicePosition: .front).first ?? frontInput.ports.first else {
-                    DispatchQueue.main.async { self.statusMessage = "No front video port." }
-                    self.session.commitConfiguration()
-                    return
-                }
-                
-                let frontPreviewConn = AVCaptureConnection(inputPort: frontPort, videoPreviewLayer: frontLayer)
-                if self.session.canAddConnection(frontPreviewConn) {
-                    self.session.addConnection(frontPreviewConn)
-                }
-                
-                let fOutput = AVCaptureVideoDataOutput()
-                fOutput.alwaysDiscardsLateVideoFrames = true
-                fOutput.setSampleBufferDelegate(self, queue: self.dataOutputQueue)
-                if self.session.canAddOutput(fOutput) {
-                    self.session.addOutputWithNoConnections(fOutput)
-                    self.frontDataOutput = fOutput
-                    let frontDataConn = AVCaptureConnection(inputPorts: [frontPort], output: fOutput)
-                    if self.session.canAddConnection(frontDataConn) {
-                        self.session.addConnection(frontDataConn)
-                    }
-                }
-                
+
                 self.session.commitConfiguration()
                 self.session.startRunning()
-                
+
+                let cost = Int(self.session.hardwareCost * 100)
                 DispatchQueue.main.async {
                     self.isConfigured = true
+                    self.activeStreamCount = count
                     self.isRunning = self.session.isRunning
-                    self.statusMessage = self.isRunning ? "Ready (1080p 30fps)" : "Session failed to start"
+                    self.statusMessage = "Active: \(count)/3 Rear Cameras (ISP Load: \(cost)%)"
                 }
             }, error: &objcError)
-            
+
             if !success, let err = objcError {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Hardware Error: \(err.localizedDescription)"
+                    self.statusMessage = "ISP Limit: \(err.localizedDescription)"
                 }
             }
         }
     }
-    
+
     func startRecording() {
         dataOutputQueue.async {
             guard !self.isRecording else { return }
-            
-            let tempDir = FileManager.default.temporaryDirectory
-            let backURL = tempDir.appendingPathComponent("Back_\(UUID().uuidString).mp4")
-            let frontURL = tempDir.appendingPathComponent("Front_\(UUID().uuidString).mp4")
-            
-            self.backOutputURL = backURL
-            self.frontOutputURL = frontURL
-            
-            let settings: [String: Any] = [
-                AVVideoCodecKey: AVVideoCodecType.h264,
-                AVVideoWidthKey: 1920,
-                AVVideoHeightKey: 1080
-            ]
-            
-            do {
-                let bWriter = try AVAssetWriter(outputURL: backURL, fileType: .mp4)
-                let bInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-                bInput.expectsMediaDataInRealTime = true
-                bInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
-                if bWriter.canAdd(bInput) { bWriter.add(bInput) }
-                self.backAssetWriter = bWriter
-                self.backWriterInput = bInput
-                
-                let fWriter = try AVAssetWriter(outputURL: frontURL, fileType: .mp4)
-                let fInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
-                fInput.expectsMediaDataInRealTime = true
-                fInput.transform = CGAffineTransform(rotationAngle: .pi / 2)
-                if fWriter.canAdd(fInput) { fWriter.add(fInput) }
-                self.frontAssetWriter = fWriter
-                self.frontWriterInput = fInput
-                
-                self.backAssetWriter?.startWriting()
-                self.frontAssetWriter?.startWriting()
-                self.isWritingStarted = false
-                
+
+            var startedAny = false
+            if self.teleDataOutput != nil {
+                if self.teleRecorder.prepare(width: 1280, height: 720) { startedAny = true }
+            }
+            if self.wideDataOutput != nil {
+                if self.wideRecorder.prepare(width: 1280, height: 720) { startedAny = true }
+            }
+            if self.ultraWideDataOutput != nil {
+                if self.ultraRecorder.prepare(width: 1280, height: 720) { startedAny = true }
+            }
+
+            if startedAny {
                 DispatchQueue.main.async {
                     self.isRecording = true
-                    self.statusMessage = "Recording..."
+                    self.statusMessage = "Recording \(self.activeStreamCount) rear cameras..."
                 }
-            } catch {
+            } else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Writer Error: \(error.localizedDescription)"
+                    self.statusMessage = "Failed to initialize video writers."
                 }
             }
         }
     }
-    
+
     func stopRecording() {
         dataOutputQueue.async {
             guard self.isRecording else { return }
             self.isRecording = false
-            
-            self.backWriterInput?.markAsFinished()
-            self.frontWriterInput?.markAsFinished()
-            
+
+            DispatchQueue.main.async {
+                self.statusMessage = "Finishing & saving videos..."
+            }
+
             let group = DispatchGroup()
-            if let bw = self.backAssetWriter {
+            var finishedURLs: [URL] = []
+            let lock = NSLock()
+
+            let recorders = [self.teleRecorder, self.wideRecorder, self.ultraRecorder]
+            for rec in recorders {
                 group.enter()
-                bw.finishWriting { group.leave() }
+                rec.finish { url in
+                    if let validURL = url {
+                        lock.lock()
+                        finishedURLs.append(validURL)
+                        lock.unlock()
+                    }
+                    group.leave()
+                }
             }
-            if let fw = self.frontAssetWriter {
-                group.enter()
-                fw.finishWriting { group.leave() }
-            }
-            
+
             group.notify(queue: .main) {
-                self.saveVideos()
-                self.statusMessage = "Saved both videos to Photos!"
+                self.saveVideosToPhotos(urls: finishedURLs)
             }
         }
     }
-    
-    private func saveVideos() {
-        PHPhotoLibrary.requestAuthorization { status in
-            guard status == .authorized else {
-                DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
+
+    private func saveVideosToPhotos(urls: [URL]) {
+        guard !urls.isEmpty else {
+            self.statusMessage = "No video frames were captured."
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Allow Photos permission in Settings to save!"
+                }
                 return
             }
-            if let bURL = self.backOutputURL {
-                PHPhotoLibrary.shared().performChanges({
-                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: bURL)
-                })
-            }
-            if let fURL = self.frontOutputURL {
-                PHPhotoLibrary.shared().performChanges({
-                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: fURL)
-                })
+
+            PHPhotoLibrary.shared().performChanges({
+                for url in urls {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                }
+            }) { success, error in
+                DispatchQueue.main.async {
+                    if success {
+                        self.statusMessage = "Saved \(urls.count) videos to Photos!"
+                    } else {
+                        self.statusMessage = "Save Error: \(error?.localizedDescription ?? "Unknown")"
+                    }
+                }
             }
         }
     }
@@ -285,18 +378,13 @@ class MultiCamRecorder: NSObject, ObservableObject {
 extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard isRecording else { return }
-        let timestamp = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
-        
-        if !isWritingStarted {
-            backAssetWriter?.startSession(atSourceTime: timestamp)
-            frontAssetWriter?.startSession(atSourceTime: timestamp)
-            isWritingStarted = true
-        }
-        
-        if output == backDataOutput, let input = backWriterInput, input.isReadyForMoreMediaData {
-            input.append(sampleBuffer)
-        } else if output == frontDataOutput, let input = frontWriterInput, input.isReadyForMoreMediaData {
-            input.append(sampleBuffer)
+
+        if output == teleDataOutput {
+            teleRecorder.append(sampleBuffer)
+        } else if output == wideDataOutput {
+            wideRecorder.append(sampleBuffer)
+        } else if output == ultraWideDataOutput {
+            ultraRecorder.append(sampleBuffer)
         }
     }
 }
