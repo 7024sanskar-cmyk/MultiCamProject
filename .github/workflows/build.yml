@@ -16,33 +16,65 @@ jobs:
       - name: Build Native iOS App
         run: |
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
-          
-          # 1. Compile Swift sources directly targeting arm64 iOS
-          mkdir -p Payload/MultiCamApp.app
-          
+          mkdir -p Payload/MultiCamApp.app build_obj
+
+          # 1. Auto-generate Objective-C Exception Catcher Header & Implementation
+          cat << 'EOF' > build_obj/ObjCExceptionCatcher.h
+          #import <Foundation/Foundation.h>
+          NS_ASSUME_NONNULL_BEGIN
+          @interface ObjCExceptionCatcher : NSObject
+          + (BOOL)tryExecute:(void(NS_NOESCAPE ^)(void))tryBlock error:(NSError * _Nullable * _Nullable)error;
+          @end
+          NS_ASSUME_NONNULL_END
+          EOF
+
+          cat << 'EOF' > build_obj/ObjCExceptionCatcher.m
+          #import "ObjCExceptionCatcher.h"
+          @implementation ObjCExceptionCatcher
+          + (BOOL)tryExecute:(void(NS_NOESCAPE ^)(void))tryBlock error:(NSError * _Nullable * _Nullable)error {
+              @try {
+                  tryBlock();
+                  return YES;
+              }
+              @catch (NSException *exception) {
+                  if (error) {
+                      NSDictionary *userInfo = @{
+                          NSLocalizedDescriptionKey: [NSString stringWithFormat:@"%@: %@", exception.name, exception.reason ?: @"Unknown reason"]
+                      };
+                      *error = [NSError errorWithDomain:@"com.local.multicam.exception" code:-1 userInfo:userInfo];
+                  }
+                  return NO;
+              }
+          }
+          @end
+          EOF
+
+          # 2. Compile Objective-C Exception Catcher
+          xcrun -sdk iphoneos clang \
+            -target arm64-apple-ios16.0 \
+            -isysroot "$SDK_PATH" \
+            -fobjc-arc \
+            -c build_obj/ObjCExceptionCatcher.m \
+            -o build_obj/ObjCExceptionCatcher.o
+
+          # 3. Compile Swift sources & link Objective-C object
           xcrun -sdk iphoneos swiftc \
             -target arm64-apple-ios16.0 \
             -sdk "$SDK_PATH" \
             -O \
-            -emit-executable \
+            -import-objc-header build_obj/ObjCExceptionCatcher.h \
             Sources/MultiCamApp/*.swift \
+            build_obj/ObjCExceptionCatcher.o \
             -o Payload/MultiCamApp.app/MultiCamApp
 
-          # 2. Add Info.plist and runtime metadata
+          # 4. Add Info.plist and PkgInfo
           cp Info.plist Payload/MultiCamApp.app/Info.plist
           echo -n "APPL????" > Payload/MultiCamApp.app/PkgInfo
 
-          # 3. Embed required Swift standard libraries for device compatibility
-          mkdir -p Payload/MultiCamApp.app/Frameworks
-          SWIFT_LIB_DIR="$(xcode-select -p)/Toolchains/XcodeDefault.xctoolchain/usr/lib/swift/iphoneos"
-          if [ -d "$SWIFT_LIB_DIR" ]; then
-            cp "$SWIFT_LIB_DIR"/*.dylib Payload/MultiCamApp.app/Frameworks/ 2>/dev/null || true
-          fi
-
-          # 4. Sign with ad-hoc signature so Sideloadly can replace it cleanly
+          # 5. Sign with ad-hoc signature
           codesign --force --deep --sign - Payload/MultiCamApp.app
 
-          # 5. Archive to IPA
+          # 6. Archive to IPA
           zip -r -y MultiCamApp.ipa Payload
 
       - name: Upload IPA Artifact
