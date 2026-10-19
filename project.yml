@@ -1,0 +1,27 @@
+name: MultiCamApp
+options:
+  bundleIdPrefix: com.local
+targets:
+  MultiCamApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - Sources/MultiCamApp
+      - Info.plist
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: MultiCamApp
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        NSCameraUsageDescription: "Required to record dual cameras simultaneously."
+        NSMicrophoneUsageDescription: "Required to record audio for videos."
+        NSPhotoLibraryAddUsageDescription: "Required to save recordings to your Photos library."
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.local.multicam
+      CODE_SIGNING_ALLOWED: NO
+      CODE_SIGNING_REQUIRED: NO

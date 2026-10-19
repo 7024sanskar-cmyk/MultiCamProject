@@ -13,12 +13,14 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Generate Xcode Project and Build App
-        run: |
-          # Generate Xcode project from Package.swift
-          swift package generate-xcodeproj
+      - name: Install XcodeGen
+        run: brew install xcodegen
 
-          # Build .app using xcodebuild
+      - name: Generate Xcode Project
+        run: xcodegen generate
+
+      - name: Build iOS Application
+        run: |
           xcodebuild build \
             -project MultiCamApp.xcodeproj \
             -scheme MultiCamApp \
@@ -31,19 +33,7 @@ jobs:
       - name: Package into IPA
         run: |
           mkdir -p Payload
-          # Copy the compiled .app bundle
           cp -R build/Release-iphoneos/MultiCamApp.app Payload/
-          
-          # Ensure Info.plist is present in the app bundle
-          cp Info.plist Payload/MultiCamApp.app/Info.plist
-          
-          # Create PkgInfo
-          echo -n "APPL????" > Payload/MultiCamApp.app/PkgInfo
-
-          # Ad-hoc sign the entire bundle structure
-          codesign --force --deep --sign - Payload/MultiCamApp.app
-          
-          # Create standard IPA archive
           zip -r -y MultiCamApp.ipa Payload
 
       - name: Upload IPA Artifact
