@@ -3,6 +3,11 @@ import AVFoundation
 import Photos
 import UIKit
 
+enum RecordingOutputMode: String, CaseIterable {
+    case threeSeparate = "3 Separate"
+    case combinedViewfinder = "Combined View"
+}
+
 // Independent thread-safe recorder for a single camera stream
 class SingleStreamRecorder {
     let name: String
@@ -35,8 +40,10 @@ class SingleStreamRecorder {
             let w = try AVAssetWriter(outputURL: url, fileType: .mp4)
             let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             inp.expectsMediaDataInRealTime = true
-            // Rotate landscape sensor buffer to portrait
-            inp.transform = CGAffineTransform(rotationAngle: .pi / 2)
+            
+            // Native sensor buffer is 1280x720 landscape (horizontal).
+            // Using .identity saves it directly as a horizontal 16:9 video!
+            inp.transform = .identity
 
             if w.canAdd(inp) {
                 w.add(inp)
@@ -72,7 +79,6 @@ class SingleStreamRecorder {
             return
         }
 
-        // If no frames were ever written, cancel cleanly instead of crashing finishWriting()
         guard isSessionStarted, writer.status == .writing else {
             writer.cancelWriting()
             self.writer = nil
@@ -95,6 +101,8 @@ class SingleStreamRecorder {
 class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
+    @Published var isTorchOn = false
+    @Published var outputMode: RecordingOutputMode = .threeSeparate
     @Published var statusMessage = "Initializing 3 Rear Cameras..."
 
     let session = AVCaptureMultiCamSession()
@@ -109,6 +117,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
     private var teleDataOutput: AVCaptureVideoDataOutput?
     private var wideDataOutput: AVCaptureVideoDataOutput?
     private var ultraWideDataOutput: AVCaptureVideoDataOutput?
+
+    private var mainWideDevice: AVCaptureDevice?
 
     private let teleRecorder = SingleStreamRecorder(name: "1_Telephoto")
     private let wideRecorder = SingleStreamRecorder(name: "2_MainWide")
@@ -132,7 +142,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         widePreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
         ultraWidePreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
 
-        // Pre-request both Camera and Photos permissions upfront so stopping never crashes
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { _ in }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
@@ -151,7 +160,42 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
-    // Selects a low-bandwidth MultiCam format (prefers binned 720p/1080p) so all 3 rear cameras fit under hardwareCost 1.0
+    func toggleTorch() {
+        sessionQueue.async {
+            let devices = [
+                self.mainWideDevice,
+                AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
+                AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back)
+            ].compactMap { $0 }
+
+            guard let device = devices.first(where: { $0.hasTorch && $0.isTorchAvailable }) else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Flash/Torch unavailable right now."
+                }
+                return
+            }
+
+            do {
+                try device.lockForConfiguration()
+                let targetState = !self.isTorchOn
+                if targetState {
+                    try device.setTorchModeOn(level: AVCaptureDevice.maxAvailableTorchLevel)
+                } else {
+                    device.torchMode = .off
+                }
+                device.unlockForConfiguration()
+
+                DispatchQueue.main.async {
+                    self.isTorchOn = (device.torchMode == .on)
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Flash error: \(error.localizedDescription)"
+                }
+            }
+        }
+    }
+
     private func configureLowCostMultiCamFormat(for device: AVCaptureDevice, prefer720p: Bool) -> Bool {
         let multiCamFormats = device.formats.filter { $0.isMultiCamSupported }
         guard !multiCamFormats.isEmpty else { return false }
@@ -176,7 +220,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         do {
             try device.lockForConfiguration()
             device.activeFormat = chosenFormat
-            // 30 fps cap to conserve ISP bandwidth across 3 sensors
             device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
             device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
@@ -190,7 +233,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         deviceType: AVCaptureDevice.DeviceType,
         previewLayer: AVCaptureVideoPreviewLayer,
         prefer720p: Bool
-    ) -> AVCaptureVideoDataOutput? {
+    ) -> (AVCaptureVideoDataOutput, AVCaptureDevice)? {
         guard let device = AVCaptureDevice.default(deviceType, for: .video, position: .back),
               configureLowCostMultiCamFormat(for: device, prefer720p: prefer720p),
               let input = try? AVCaptureDeviceInput(device: device),
@@ -206,9 +249,13 @@ class MultiCamRecorder: NSObject, ObservableObject {
             return nil
         }
 
+        // Viewfinder stays upright portrait while raw data output remains horizontal landscape
         let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: previewLayer)
         if session.canAddConnection(previewConn) {
             session.addConnection(previewConn)
+            if previewConn.isVideoOrientationSupported {
+                previewConn.videoOrientation = .portrait
+            }
         }
 
         let dataOutput = AVCaptureVideoDataOutput()
@@ -220,7 +267,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             let dataConn = AVCaptureConnection(inputPorts: [port], output: dataOutput)
             if session.canAddConnection(dataConn) {
                 session.addConnection(dataConn)
-                return dataOutput
+                return (dataOutput, device)
             }
         }
 
@@ -246,20 +293,21 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
                 var count = 0
 
-                // 1. TOP: Telephoto Camera (720p binned to save ISP bandwidth)
-                if let out = self.addRearCamera(deviceType: .builtInTelephotoCamera, previewLayer: teleLayer, prefer720p: true) {
+                // 1. TOP: Telephoto Camera
+                if let (out, _) = self.addRearCamera(deviceType: .builtInTelephotoCamera, previewLayer: teleLayer, prefer720p: true) {
                     self.teleDataOutput = out
                     count += 1
                 }
 
-                // 2. MIDDLE: Main Wide Camera (1080p binned)
-                if let out = self.addRearCamera(deviceType: .builtInWideAngleCamera, previewLayer: wideLayer, prefer720p: true) {
+                // 2. MIDDLE: Main Wide Camera
+                if let (out, dev) = self.addRearCamera(deviceType: .builtInWideAngleCamera, previewLayer: wideLayer, prefer720p: true) {
                     self.wideDataOutput = out
+                    self.mainWideDevice = dev
                     count += 1
                 }
 
-                // 3. BOTTOM: Ultra-Wide Camera (720p binned)
-                if let out = self.addRearCamera(deviceType: .builtInUltraWideCamera, previewLayer: ultraLayer, prefer720p: true) {
+                // 3. BOTTOM: Ultra-Wide Camera
+                if let (out, _) = self.addRearCamera(deviceType: .builtInUltraWideCamera, previewLayer: ultraLayer, prefer720p: true) {
                     self.ultraWideDataOutput = out
                     count += 1
                 }
@@ -272,7 +320,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
                     self.isConfigured = true
                     self.activeStreamCount = count
                     self.isRunning = self.session.isRunning
-                    self.statusMessage = "Active: \(count)/3 Rear Cameras (ISP Load: \(cost)%)"
+                    self.statusMessage = "Active: \(count)/3 Cameras (ISP: \(cost)%)"
                 }
             }, error: &objcError)
 
@@ -302,7 +350,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             if startedAny {
                 DispatchQueue.main.async {
                     self.isRecording = true
-                    self.statusMessage = "Recording \(self.activeStreamCount) rear cameras..."
+                    self.statusMessage = "Recording (\(self.outputMode.rawValue))..."
                 }
             } else {
                 DispatchQueue.main.async {
@@ -313,47 +361,154 @@ class MultiCamRecorder: NSObject, ObservableObject {
     }
 
     func stopRecording() {
+        let selectedMode = self.outputMode
+
         dataOutputQueue.async {
             guard self.isRecording else { return }
             self.isRecording = false
 
             DispatchQueue.main.async {
-                self.statusMessage = "Finishing & saving videos..."
+                self.statusMessage = "Finishing recording..."
             }
 
             let group = DispatchGroup()
-            var finishedURLs: [URL] = []
-            let lock = NSLock()
+            var teleURL: URL?
+            var wideURL: URL?
+            var ultraURL: URL?
 
-            let recorders = [self.teleRecorder, self.wideRecorder, self.ultraRecorder]
-            for rec in recorders {
-                group.enter()
-                rec.finish { url in
-                    if let validURL = url {
-                        lock.lock()
-                        finishedURLs.append(validURL)
-                        lock.unlock()
-                    }
-                    group.leave()
-                }
-            }
+            group.enter()
+            self.teleRecorder.finish { url in teleURL = url; group.leave() }
+
+            group.enter()
+            self.wideRecorder.finish { url in wideURL = url; group.leave() }
+
+            group.enter()
+            self.ultraRecorder.finish { url in ultraURL = url; group.leave() }
 
             group.notify(queue: .main) {
-                self.saveVideosToPhotos(urls: finishedURLs)
+                let allURLs = [teleURL, wideURL, ultraURL].compactMap { $0 }
+                guard !allURLs.isEmpty else {
+                    self.statusMessage = "No frames captured."
+                    return
+                }
+
+                if selectedMode == .threeSeparate {
+                    self.saveVideosToPhotos(urls: allURLs)
+                } else {
+                    self.statusMessage = "Merging into Viewfinder Layout..."
+                    self.exportCombinedViewfinderVideo(teleURL: teleURL, wideURL: wideURL, ultraURL: ultraURL) { mergedURL in
+                        if let validMerged = mergedURL {
+                            self.saveVideosToPhotos(urls: [validMerged])
+                        } else {
+                            // Fallback: save individual files if merge fails
+                            self.saveVideosToPhotos(urls: allURLs)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Combines the 3 streams vertically (Top: Telephoto, Middle: Main, Bottom: Ultra-Wide) to match the Viewfinder
+    private func exportCombinedViewfinderVideo(
+        teleURL: URL?,
+        wideURL: URL?,
+        ultraURL: URL?,
+        completion: @escaping (URL?) -> Void
+    ) {
+        let composition = AVMutableComposition()
+        let orderedURLs = [teleURL, wideURL, ultraURL]
+        var layerInstructions: [AVMutableVideoCompositionLayerInstruction] = []
+        var minDuration: CMTime = .positiveInfinity
+
+        // Output canvas: 1080x1920 split into 3 stacked boxes of 1080x640 each
+        let canvasWidth: CGFloat = 1080
+        let slotHeight: CGFloat = 640
+
+        for (index, optionalURL) in orderedURLs.enumerated() {
+            guard let url = optionalURL else { continue }
+            let asset = AVURLAsset(url: url)
+            guard let sourceTrack = asset.tracks(withMediaType: .video).first,
+                  let compTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+                continue
+            }
+
+            let duration = asset.duration
+            if duration < minDuration && duration.seconds > 0 {
+                minDuration = duration
+            }
+
+            do {
+                try compTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: sourceTrack, at: .zero)
+                let instruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
+
+                // Raw sensor frame is 1280x720. Rotate 90 deg clockwise -> becomes 720x1280 portrait.
+                // Scale width 720 -> 1080 (scale = 1.5 -> 1080x1920) and center-crop vertically into the 1080x640 slot.
+                let scale: CGFloat = canvasWidth / 720.0 // 1.5
+                let rotatedHeight: CGFloat = 1280.0 * scale // 1920.0
+                let ySlotOffset = CGFloat(index) * slotHeight
+                let cropOffsetY = (rotatedHeight - slotHeight) / 2.0
+
+                // Transform order: rotate 90deg around origin, shift right by 720, scale by 1.5, position into slot
+                var transform = CGAffineTransform(translationX: 720, y: 0)
+                transform = transform.rotated(by: .pi / 2)
+                transform = CGAffineTransform(scaleX: scale, y: scale).concatenating(transform)
+                transform = transform.concatenating(CGAffineTransform(translationX: 0, y: ySlotOffset - cropOffsetY))
+
+                instruction.setTransform(transform, at: .zero)
+
+                // Crop rectangle so each camera stays strictly inside its 1/3 vertical slot
+                let cropRect = CGRect(x: 0, y: (1280.0 - (slotHeight / scale)) / 2.0, width: 1280.0, height: 720.0)
+                let _ = cropRect // Keep clean full width
+                layerInstructions.append(instruction)
+            } catch {
+                continue
+            }
+        }
+
+        guard !layerInstructions.isEmpty, minDuration.isValid, !minDuration.isIndefinite else {
+            completion(nil)
+            return
+        }
+
+        let mainInstruction = AVMutableVideoCompositionInstruction()
+        mainInstruction.timeRange = CMTimeRange(start: .zero, duration: minDuration)
+        mainInstruction.layerInstructions = layerInstructions
+
+        let videoComp = AVMutableVideoComposition()
+        videoComp.renderSize = CGSize(width: 1080, height: 1920)
+        videoComp.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComp.instructions = [mainInstruction]
+
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("CombinedViewfinder_\(Int(Date().timeIntervalSince1970)).mp4")
+        try? FileManager.default.removeItem(at: outputURL)
+
+        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
+            completion(nil)
+            return
+        }
+
+        exporter.outputURL = outputURL
+        exporter.outputFileType = .mp4
+        exporter.videoComposition = videoComp
+        exporter.timeRange = CMTimeRange(start: .zero, duration: minDuration)
+
+        exporter.exportAsynchronously {
+            DispatchQueue.main.async {
+                if exporter.status == .completed {
+                    completion(outputURL)
+                } else {
+                    completion(nil)
+                }
             }
         }
     }
 
     private func saveVideosToPhotos(urls: [URL]) {
-        guard !urls.isEmpty else {
-            self.statusMessage = "No video frames were captured."
-            return
-        }
-
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Allow Photos permission in Settings to save!"
+                    self.statusMessage = "Allow Photos permission in Settings!"
                 }
                 return
             }
@@ -365,7 +520,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             }) { success, error in
                 DispatchQueue.main.async {
                     if success {
-                        self.statusMessage = "Saved \(urls.count) videos to Photos!"
+                        self.statusMessage = urls.count == 1
+                            ? "Saved Combined Viewfinder Video!"
+                            : "Saved \(urls.count) Horizontal Videos!"
                     } else {
                         self.statusMessage = "Save Error: \(error?.localizedDescription ?? "Unknown")"
                     }

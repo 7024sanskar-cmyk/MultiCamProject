@@ -14,9 +14,9 @@ struct ContentView: View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
 
+            // 3 Stacked Viewfinders: Top (Telephoto), Middle (Main), Bottom (Ultra-Wide)
             VStack(spacing: 3) {
-                // TOP: Telephoto Lens
-                ZStack(alignment: .topLeading) {
+                ZStack(alignment: .bottomLeading) {
                     CameraViewRepresentable(previewView: recorder.telePreviewView)
                         .clipped()
                     Text("TELEPHOTO")
@@ -29,8 +29,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // MIDDLE: Main Wide Camera
-                ZStack(alignment: .topLeading) {
+                ZStack(alignment: .bottomLeading) {
                     CameraViewRepresentable(previewView: recorder.widePreviewView)
                         .clipped()
                     Text("MAIN CAMERA (1x)")
@@ -43,8 +42,7 @@ struct ContentView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-                // BOTTOM: Ultra-Wide Camera
-                ZStack(alignment: .topLeading) {
+                ZStack(alignment: .bottomLeading) {
                     CameraViewRepresentable(previewView: recorder.ultraWidePreviewView)
                         .clipped()
                     Text("ULTRA WIDE (0.5x)")
@@ -58,21 +56,67 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            // Status & Record Button Overlay
+            // Top & Bottom Controls Overlay
             VStack {
-                if !recorder.statusMessage.isEmpty {
-                    Text(recorder.statusMessage)
-                        .font(.caption.bold())
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 6)
+                // Top Bar: Status + Flash Button + Output Mode Selector
+                VStack(spacing: 8) {
+                    HStack {
+                        // Flash / Torch Toggle Button
+                        Button(action: {
+                            recorder.toggleTorch()
+                        }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: recorder.isTorchOn ? "bolt.fill" : "bolt.slash.fill")
+                                Text(recorder.isTorchOn ? "FLASH ON" : "FLASH OFF")
+                                    .font(.caption2.bold())
+                            }
+                            .foregroundColor(recorder.isTorchOn ? .black : .white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 7)
+                            .background(recorder.isTorchOn ? Color.yellow : Color.black.opacity(0.75))
+                            .cornerRadius(8)
+                        }
+
+                        Spacer()
+
+                        // Output Mode Toggle (3 Separate Videos vs 1 Combined Viewfinder Video)
+                        HStack(spacing: 0) {
+                            ForEach(RecordingOutputMode.allCases, id: \.self) { mode in
+                                Button(action: {
+                                    if !recorder.isRecording {
+                                        recorder.outputMode = mode
+                                    }
+                                }) {
+                                    Text(mode.rawValue)
+                                        .font(.caption2.bold())
+                                        .foregroundColor(recorder.outputMode == mode ? .black : .white)
+                                        .padding(.horizontal, 10)
+                                        .padding(.vertical, 7)
+                                        .background(recorder.outputMode == mode ? Color.white : Color.clear)
+                                        .cornerRadius(6)
+                                }
+                            }
+                        }
                         .background(Color.black.opacity(0.75))
                         .cornerRadius(8)
-                        .padding(.top, 44)
+                    }
+                    .padding(.horizontal, 14)
+
+                    if !recorder.statusMessage.isEmpty {
+                        Text(recorder.statusMessage)
+                            .font(.caption.bold())
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 5)
+                            .background(Color.black.opacity(0.75))
+                            .cornerRadius(8)
+                    }
                 }
+                .padding(.top, 46)
 
                 Spacer()
 
+                // Shutter Record Button
                 Button(action: {
                     recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
                 }) {
