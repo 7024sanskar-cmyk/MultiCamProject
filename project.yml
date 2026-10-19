@@ -1,6 +1,7 @@
 name: MultiCamApp
 options:
   bundleIdPrefix: com.local
+  xcodeVersion: "15.0"
 targets:
   MultiCamApp:
     type: application
@@ -8,7 +9,6 @@ targets:
     deploymentTarget: "16.0"
     sources:
       - Sources/MultiCamApp
-      - Info.plist
     info:
       path: Info.plist
       properties:
