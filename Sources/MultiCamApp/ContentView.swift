@@ -14,7 +14,7 @@ struct ContentView: View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
 
-            // 3 Stacked Viewfinders: Top (Telephoto), Middle (Main), Bottom (Ultra-Wide)
+            // 3 Stacked Viewfinders
             VStack(spacing: 3) {
                 ZStack(alignment: .bottomLeading) {
                     CameraViewRepresentable(previewView: recorder.telePreviewView)
@@ -32,7 +32,7 @@ struct ContentView: View {
                 ZStack(alignment: .bottomLeading) {
                     CameraViewRepresentable(previewView: recorder.widePreviewView)
                         .clipped()
-                    Text("MAIN CAMERA (1x)")
+                    Text("MAIN CAMERA")
                         .font(.caption2.bold())
                         .foregroundColor(.white)
                         .padding(5)
@@ -45,7 +45,7 @@ struct ContentView: View {
                 ZStack(alignment: .bottomLeading) {
                     CameraViewRepresentable(previewView: recorder.ultraWidePreviewView)
                         .clipped()
-                    Text("ULTRA WIDE (0.5x)")
+                    Text("ULTRA WIDE")
                         .font(.caption2.bold())
                         .foregroundColor(.white)
                         .padding(5)
@@ -56,18 +56,15 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
 
-            // Top & Bottom Controls Overlay
+            // Controls Overlay
             VStack {
-                // Top Bar: Status + Flash Button + Output Mode Selector
                 VStack(spacing: 8) {
                     HStack {
-                        // Flash / Torch Toggle Button
-                        Button(action: {
-                            recorder.toggleTorch()
-                        }) {
+                        // Flash Button
+                        Button(action: { recorder.toggleTorch() }) {
                             HStack(spacing: 4) {
                                 Image(systemName: recorder.isTorchOn ? "bolt.fill" : "bolt.slash.fill")
-                                Text(recorder.isTorchOn ? "FLASH ON" : "FLASH OFF")
+                                Text(recorder.isTorchOn ? "FLASH" : "NO FLASH")
                                     .font(.caption2.bold())
                             }
                             .foregroundColor(recorder.isTorchOn ? .black : .white)
@@ -79,20 +76,20 @@ struct ContentView: View {
 
                         Spacer()
 
-                        // Output Mode Toggle (3 Separate Videos vs 1 Combined Viewfinder Video)
+                        // 4K Camera Selector Picker
                         HStack(spacing: 0) {
-                            ForEach(RecordingOutputMode.allCases, id: \.self) { mode in
+                            ForEach(FourKCameraChoice.allCases, id: \.self) { choice in
                                 Button(action: {
                                     if !recorder.isRecording {
-                                        recorder.outputMode = mode
+                                        recorder.selected4K = choice
                                     }
                                 }) {
-                                    Text(mode.rawValue)
+                                    Text(choice.rawValue)
                                         .font(.caption2.bold())
-                                        .foregroundColor(recorder.outputMode == mode ? .black : .white)
-                                        .padding(.horizontal, 10)
+                                        .foregroundColor(recorder.selected4K == choice ? .black : .white)
+                                        .padding(.horizontal, 8)
                                         .padding(.vertical, 7)
-                                        .background(recorder.outputMode == mode ? Color.white : Color.clear)
+                                        .background(recorder.selected4K == choice ? Color.white : Color.clear)
                                         .cornerRadius(6)
                                 }
                             }

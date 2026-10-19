@@ -3,9 +3,10 @@ import AVFoundation
 import Photos
 import UIKit
 
-enum RecordingOutputMode: String, CaseIterable {
-    case threeSeparate = "3 Separate"
-    case combinedView = "Combined View"
+enum FourKCameraChoice: String, CaseIterable {
+    case telephoto = "Tele 4K"
+    case mainWide = "Main 4K"
+    case ultraWide = "Ultra 4K"
 }
 
 // Independent thread-safe recorder for a single camera stream
@@ -20,14 +21,13 @@ class SingleStreamRecorder {
         self.name = name
     }
 
-    func prepare(width: Int, height: Int, fps: Int) -> Bool {
+    func prepare(width: Int, height: Int) -> Bool {
         let tempDir = FileManager.default.temporaryDirectory
         let url = tempDir.appendingPathComponent("\(name)_\(Int(Date().timeIntervalSince1970))_\(UUID().uuidString.prefix(4)).mp4")
         try? FileManager.default.removeItem(at: url)
         self.outputURL = url
         self.isSessionStarted = false
 
-        // Bitrate for 4K 30fps (30 Mbps), standard for 1080p 30fps (10 Mbps)
         let bitrate = (width == 3840) ? 30_000_000 : 10_000_000
 
         let settings: [String: Any] = [
@@ -102,8 +102,13 @@ class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
     @Published var isTorchOn = false
-    @Published var outputMode: RecordingOutputMode = .threeSeparate
-    @Published var statusMessage = "Configuring 4K30 & 1080p30 Streams..."
+    @Published var selected4K: FourKCameraChoice = .telephoto {
+        didSet {
+            // Reconfigure session when 4K target changes
+            restartSession()
+        }
+    }
+    @Published var statusMessage = "Configuring Cameras..."
 
     let session = AVCaptureMultiCamSession()
     private let sessionQueue = DispatchQueue(label: "multicam.session.queue")
@@ -119,11 +124,10 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
     private var mainWideDevice: AVCaptureDevice?
 
-    private let teleRecorder = SingleStreamRecorder(name: "1_Telephoto_4K30")
-    private let wideRecorder = SingleStreamRecorder(name: "2_MainWide_1080p30")
-    private let ultraRecorder = SingleStreamRecorder(name: "3_UltraWide_1080p30")
+    private let teleRecorder = SingleStreamRecorder(name: "1_Telephoto")
+    private let wideRecorder = SingleStreamRecorder(name: "2_MainWide")
+    private let ultraRecorder = SingleStreamRecorder(name: "3_UltraWide")
 
-    private var activeStreamCount = 0
     private var isConfigured = false
 
     override init() {
@@ -159,6 +163,13 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
+    private func restartSession() {
+        sessionQueue.async {
+            self.session.stopRunning()
+            self.setupSession()
+        }
+    }
+
     func toggleTorch() {
         sessionQueue.async {
             let devices = [
@@ -168,9 +179,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             ].compactMap { $0 }
 
             guard let device = devices.first(where: { $0.hasTorch && $0.isTorchAvailable }) else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Flash/Torch unavailable right now."
-                }
+                DispatchQueue.main.async { self.statusMessage = "Flash unavailable." }
                 return
             }
 
@@ -183,14 +192,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
                     device.torchMode = .off
                 }
                 device.unlockForConfiguration()
-
-                DispatchQueue.main.async {
-                    self.isTorchOn = (device.torchMode == .on)
-                }
+                DispatchQueue.main.async { self.isTorchOn = (device.torchMode == .on) }
             } catch {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Flash error: \(error.localizedDescription)"
-                }
+                DispatchQueue.main.async { self.statusMessage = "Flash error." }
             }
         }
     }
@@ -270,12 +274,11 @@ class MultiCamRecorder: NSObject, ObservableObject {
         let teleLayer = telePreviewView.videoPreviewLayer
         let wideLayer = widePreviewView.videoPreviewLayer
         let ultraLayer = ultraWidePreviewView.videoPreviewLayer
+        let current4K = self.selected4K
 
         sessionQueue.async {
             guard AVCaptureMultiCamSession.isMultiCamSupported else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Multi-cam not supported on this iPhone."
-                }
+                DispatchQueue.main.async { self.statusMessage = "Multi-cam not supported." }
                 return
             }
 
@@ -283,43 +286,43 @@ class MultiCamRecorder: NSObject, ObservableObject {
             let success = ObjCExceptionCatcher.tryExecute({
                 self.session.beginConfiguration()
 
-                var count = 0
+                // Remove existing inputs/outputs if restarting
+                for input in self.session.inputs { self.session.removeInput(input) }
+                for output in self.session.outputs { self.session.removeOutput(output) }
 
-                // 1. TOP: Telephoto Camera -> 4K (3840x2160) at 30 fps
-                if let (out, _) = self.addRearCamera(deviceType: .builtInTelephotoCamera, previewLayer: teleLayer, targetWidth: 3840, targetHeight: 2160, targetFps: 30) {
+                // Determine resolutions based on user selection
+                let teleRes: (Int32, Int32) = (current4K == .telephoto) ? (3840, 2160) : (1920, 1080)
+                let wideRes: (Int32, Int32) = (current4K == .mainWide) ? (3840, 2160) : (1920, 1080)
+                let ultraRes: (Int32, Int32) = (current4K == .ultraWide) ? (3840, 2160) : (1920, 1080)
+
+                // 1. Telephoto
+                if let (out, _) = self.addRearCamera(deviceType: .builtInTelephotoCamera, previewLayer: teleLayer, targetWidth: teleRes.0, targetHeight: teleRes.1, targetFps: 30) {
                     self.teleDataOutput = out
-                    count += 1
                 }
 
-                // 2. MIDDLE: Main Wide Camera -> 1080p (1920x1080) at 30 fps
-                if let (out, dev) = self.addRearCamera(deviceType: .builtInWideAngleCamera, previewLayer: wideLayer, targetWidth: 1920, targetHeight: 1080, targetFps: 30) {
+                // 2. Main Wide
+                if let (out, dev) = self.addRearCamera(deviceType: .builtInWideAngleCamera, previewLayer: wideLayer, targetWidth: wideRes.0, targetHeight: wideRes.1, targetFps: 30) {
                     self.wideDataOutput = out
                     self.mainWideDevice = dev
-                    count += 1
                 }
 
-                // 3. BOTTOM: Ultra-Wide Camera -> 1080p (1920x1080) at 30 fps
-                if let (out, _) = self.addRearCamera(deviceType: .builtInUltraWideCamera, previewLayer: ultraLayer, targetWidth: 1920, targetHeight: 1080, targetFps: 30) {
+                // 3. Ultra-Wide
+                if let (out, _) = self.addRearCamera(deviceType: .builtInUltraWideCamera, previewLayer: ultraLayer, targetWidth: ultraRes.0, targetHeight: ultraRes.1, targetFps: 30) {
                     self.ultraWideDataOutput = out
-                    count += 1
                 }
 
                 self.session.commitConfiguration()
                 self.session.startRunning()
 
-                let cost = Int(self.session.hardwareCost * 100)
                 DispatchQueue.main.async {
                     self.isConfigured = true
-                    self.activeStreamCount = count
                     self.isRunning = self.session.isRunning
-                    self.statusMessage = "Active: \(count)/3 Cameras (Tele 4K30, ISP: \(cost)%)"
+                    self.statusMessage = "4K Target: \(current4K.rawValue)"
                 }
             }, error: &objcError)
 
             if !success, let err = objcError {
-                DispatchQueue.main.async {
-                    self.statusMessage = "ISP Limit Reached: \(err.localizedDescription)"
-                }
+                DispatchQueue.main.async { self.statusMessage = "ISP Limit: \(err.localizedDescription)" }
             }
         }
     }
@@ -328,186 +331,64 @@ class MultiCamRecorder: NSObject, ObservableObject {
         dataOutputQueue.async {
             guard !self.isRecording else { return }
 
+            let teleDim = (self.selected4K == .telephoto) ? (3840, 2160) : (1920, 1080)
+            let wideDim = (self.selected4K == .mainWide) ? (3840, 2160) : (1920, 1080)
+            let ultraDim = (self.selected4K == .ultraWide) ? (3840, 2160) : (1920, 1080)
+
             var startedAny = false
-            // Telephoto records 4K 30fps (3840x2160), Main & Ultra-Wide record 1080p 30fps (1920x1080)
             if self.teleDataOutput != nil {
-                if self.teleRecorder.prepare(width: 3840, height: 2160, fps: 30) { startedAny = true }
+                if self.teleRecorder.prepare(width: teleDim.0, height: teleDim.1) { startedAny = true }
             }
             if self.wideDataOutput != nil {
-                if self.wideRecorder.prepare(width: 1920, height: 1080, fps: 30) { startedAny = true }
+                if self.wideRecorder.prepare(width: wideDim.0, height: wideDim.1) { startedAny = true }
             }
             if self.ultraWideDataOutput != nil {
-                if self.ultraRecorder.prepare(width: 1920, height: 1080, fps: 30) { startedAny = true }
+                if self.ultraRecorder.prepare(width: ultraDim.0, height: ultraDim.1) { startedAny = true }
             }
 
             if startedAny {
                 DispatchQueue.main.async {
                     self.isRecording = true
-                    self.statusMessage = "Recording 4K30 Tele + 1080p30 Main/Ultra..."
+                    self.statusMessage = "Recording..."
                 }
             } else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Failed to initialize video writers."
-                }
+                DispatchQueue.main.async { self.statusMessage = "Recorder init failed." }
             }
         }
     }
 
     func stopRecording() {
-        let selectedMode = self.outputMode
-
         dataOutputQueue.async {
             guard self.isRecording else { return }
             self.isRecording = false
 
-            DispatchQueue.main.async {
-                self.statusMessage = "Finishing recording..."
-            }
+            DispatchQueue.main.async { self.statusMessage = "Saving recordings..." }
 
             let group = DispatchGroup()
             var teleURL: URL?
             var wideURL: URL?
             var ultraURL: URL?
 
-            group.enter()
-            self.teleRecorder.finish { url in teleURL = url; group.leave() }
-
-            group.enter()
-            self.wideRecorder.finish { url in wideURL = url; group.leave() }
-
-            group.enter()
-            self.ultraRecorder.finish { url in ultraURL = url; group.leave() }
+            group.enter(); self.teleRecorder.finish { teleURL = $0; group.leave() }
+            group.enter(); self.wideRecorder.finish { wideURL = $0; group.leave() }
+            group.enter(); self.ultraRecorder.finish { ultraURL = $0; group.leave() }
 
             group.notify(queue: .main) {
                 let allURLs = [teleURL, wideURL, ultraURL].compactMap { $0 }
-                guard !allURLs.isEmpty else {
-                    self.statusMessage = "No frames captured."
-                    return
-                }
-
-                if selectedMode == .threeSeparate {
-                    self.saveVideosToPhotos(urls: allURLs)
-                } else {
-                    self.statusMessage = "Exporting Combined Viewfinder Layout..."
-                    self.exportCombinedViewfinderVideo(teleURL: teleURL, wideURL: wideURL, ultraURL: ultraURL) { mergedURL in
-                        if let validMerged = mergedURL {
-                            self.saveVideosToPhotos(urls: [validMerged])
-                        } else {
-                            self.saveVideosToPhotos(urls: allURLs)
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    private func exportCombinedViewfinderVideo(
-        teleURL: URL?,
-        wideURL: URL?,
-        ultraURL: URL?,
-        completion: @escaping (URL?) -> Void
-    ) {
-        let composition = AVMutableComposition()
-        let orderedURLs = [teleURL, wideURL, ultraURL]
-        var layerInstructions: [AVMutableVideoCompositionLayerInstruction] = []
-        var minDuration: CMTime = .positiveInfinity
-
-        let canvasWidth: CGFloat = 1080
-        let canvasHeight: CGFloat = 1920
-        let spacing: CGFloat = 3.0
-        let totalSpacing: CGFloat = spacing * 2.0
-        let slotHeight: CGFloat = (canvasHeight - totalSpacing) / 3.0
-
-        for (index, optionalURL) in orderedURLs.enumerated() {
-            guard let url = optionalURL else { continue }
-            let asset = AVURLAsset(url: url)
-            let duration = asset.duration
-            guard duration.seconds > 0,
-                  let sourceTrack = asset.tracks(withMediaType: .video).first,
-                  let compTrack = composition.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid) else {
-                continue
-            }
-
-            if duration < minDuration {
-                minDuration = duration
-            }
-
-            do {
-                try compTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: sourceTrack, at: .zero)
-                let instruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compTrack)
-
-                let sourceSize = sourceTrack.naturalSize
-                let sourceW = sourceSize.width > 0 ? sourceSize.width : 1920.0
-                let sourceH = sourceSize.height > 0 ? sourceSize.height : 1080.0
-
-                let scaleX = canvasWidth / sourceW
-                let scaleY = slotHeight / sourceH
-                let scale = max(scaleX, scaleY)
-
-                let scaledW = sourceW * scale
-                let scaledH = sourceH * scale
-
-                let xOffset = (canvasWidth - scaledW) / 2.0
-                let yOffset = (slotHeight - scaledH) / 2.0
-                let slotY = CGFloat(index) * (slotHeight + spacing)
-
-                var transform = CGAffineTransform(translationX: sourceW, y: 0)
-                transform = transform.rotated(by: .pi / 2)
-                transform = CGAffineTransform(scaleX: scale, y: scale).concatenating(transform)
-                transform = transform.concatenating(CGAffineTransform(translationX: xOffset, y: slotY + yOffset))
-
-                instruction.setTransform(transform, at: .zero)
-                layerInstructions.append(instruction)
-            } catch {
-                continue
-            }
-        }
-
-        guard !layerInstructions.isEmpty, minDuration.isValid, !minDuration.isIndefinite else {
-            completion(nil)
-            return
-        }
-
-        let mainInstruction = AVMutableVideoCompositionInstruction()
-        mainInstruction.timeRange = CMTimeRange(start: .zero, duration: minDuration)
-        mainInstruction.layerInstructions = layerInstructions
-
-        let videoComp = AVMutableVideoComposition()
-        videoComp.renderSize = CGSize(width: canvasWidth, height: canvasHeight)
-        videoComp.frameDuration = CMTime(value: 1, timescale: 30)
-        videoComp.instructions = [mainInstruction]
-
-        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("ExactViewfinderLayout_\(Int(Date().timeIntervalSince1970)).mp4")
-        try? FileManager.default.removeItem(at: outputURL)
-
-        guard let exporter = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetHighestQuality) else {
-            completion(nil)
-            return
-        }
-
-        exporter.outputURL = outputURL
-        exporter.outputFileType = .mp4
-        exporter.videoComposition = videoComp
-        exporter.timeRange = CMTimeRange(start: .zero, duration: minDuration)
-
-        exporter.exportAsynchronously {
-            DispatchQueue.main.async {
-                if exporter.status == .completed {
-                    completion(outputURL)
-                } else {
-                    print("Export failed: \(String(describing: exporter.error))")
-                    completion(nil)
-                }
+                self.saveVideosToPhotos(urls: allURLs)
             }
         }
     }
 
     private func saveVideosToPhotos(urls: [URL]) {
+        guard !urls.isEmpty else {
+            self.statusMessage = "No video frames captured."
+            return
+        }
+
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
-                DispatchQueue.main.async {
-                    self.statusMessage = "Allow Photos permission in Settings!"
-                }
+                DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
                 return
             }
 
@@ -517,13 +398,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 }
             }) { success, error in
                 DispatchQueue.main.async {
-                    if success {
-                        self.statusMessage = urls.count == 1
-                            ? "Saved Combined Viewfinder Video!"
-                            : "Saved \(urls.count) Horizontal Videos (Tele 4K30)!"
-                    } else {
-                        self.statusMessage = "Save Error: \(error?.localizedDescription ?? "Unknown")"
-                    }
+                    self.statusMessage = success ? "Saved \(urls.count) videos to Photos!" : "Save error."
                 }
             }
         }
@@ -533,13 +408,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
 extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard isRecording else { return }
-
-        if output == teleDataOutput {
-            teleRecorder.append(sampleBuffer)
-        } else if output == wideDataOutput {
-            wideRecorder.append(sampleBuffer)
-        } else if output == ultraWideDataOutput {
-            ultraRecorder.append(sampleBuffer)
-        }
+        if output == teleDataOutput { teleRecorder.append(sampleBuffer) }
+        else if output == wideDataOutput { wideRecorder.append(sampleBuffer) }
+        else if output == ultraWideDataOutput { ultraRecorder.append(sampleBuffer) }
     }
 }
