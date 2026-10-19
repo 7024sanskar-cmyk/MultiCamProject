@@ -13,32 +13,37 @@ jobs:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Compile for iOS Device
+      - name: Generate Xcode Project and Build App
         run: |
-          xcrun swift build -c release \
-            --triple arm64-apple-ios16.0 \
-            --sdk $(xcrun --sdk iphoneos --show-sdk-path)
+          # Generate Xcode project from Package.swift
+          swift package generate-xcodeproj
 
-      - name: Package and Sign into IPA
+          # Build .app using xcodebuild
+          xcodebuild build \
+            -project MultiCamApp.xcodeproj \
+            -scheme MultiCamApp \
+            -destination "generic/platform=iOS" \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CONFIGURATION_BUILD_DIR="$(pwd)/build/Release-iphoneos"
+
+      - name: Package into IPA
         run: |
-          rm -rf Payload MultiCamApp.ipa
-          mkdir -p Payload/MultiCamApp.app
+          mkdir -p Payload
+          # Copy the compiled .app bundle
+          cp -R build/Release-iphoneos/MultiCamApp.app Payload/
           
-          # Find and copy executable
-          BINARY_PATH=$(find .build -type f -name MultiCamApp -not -path "*/.build/*.build/*" | head -n 1)
-          cp "$BINARY_PATH" Payload/MultiCamApp.app/MultiCamApp
-          chmod +x Payload/MultiCamApp.app/MultiCamApp
-          
-          # Copy Info.plist
+          # Ensure Info.plist is present in the app bundle
           cp Info.plist Payload/MultiCamApp.app/Info.plist
           
           # Create PkgInfo
           echo -n "APPL????" > Payload/MultiCamApp.app/PkgInfo
 
-          # Apply ad-hoc codesign so Sideloadly can replace it
+          # Ad-hoc sign the entire bundle structure
           codesign --force --deep --sign - Payload/MultiCamApp.app
           
-          # Package into IPA
+          # Create standard IPA archive
           zip -r -y MultiCamApp.ipa Payload
 
       - name: Upload IPA Artifact
