@@ -21,12 +21,21 @@ jobs:
 
       - name: Package into IPA
         run: |
+          rm -rf Payload MultiCamApp.ipa
           mkdir -p Payload/MultiCamApp.app
+          
+          # Find and copy binary
           BINARY_PATH=$(find .build -type f -name MultiCamApp -not -path "*/.build/*.build/*" | head -n 1)
-          echo "Found binary at: $BINARY_PATH"
           cp "$BINARY_PATH" Payload/MultiCamApp.app/MultiCamApp
+          chmod +x Payload/MultiCamApp.app/MultiCamApp
+          
+          # Copy Info.plist
           cp Info.plist Payload/MultiCamApp.app/Info.plist
-          zip -r MultiCamApp.ipa Payload
+          
+          # Create PkgInfo required by iOS runtime
+          echo -n "APPL????" > Payload/MultiCamApp.app/PkgInfo
+          
+          zip -r -y MultiCamApp.ipa Payload
 
       - name: Upload IPA Artifact
         uses: actions/upload-artifact@v4
