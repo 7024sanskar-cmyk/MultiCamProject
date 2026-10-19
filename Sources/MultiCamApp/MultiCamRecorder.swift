@@ -35,8 +35,7 @@ class SingleStreamRecorder {
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: bitrate,
-                AVVideoExpectedFrameRateKey: fps
+                AVVideoAverageBitRateKey: bitrate
             ]
         ]
 
