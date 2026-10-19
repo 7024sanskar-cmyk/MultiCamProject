@@ -19,12 +19,12 @@ jobs:
             --triple arm64-apple-ios16.0 \
             --sdk $(xcrun --sdk iphoneos --show-sdk-path)
 
-      - name: Package into IPA
+      - name: Package and Sign into IPA
         run: |
           rm -rf Payload MultiCamApp.ipa
           mkdir -p Payload/MultiCamApp.app
           
-          # Find and copy binary
+          # Find and copy executable
           BINARY_PATH=$(find .build -type f -name MultiCamApp -not -path "*/.build/*.build/*" | head -n 1)
           cp "$BINARY_PATH" Payload/MultiCamApp.app/MultiCamApp
           chmod +x Payload/MultiCamApp.app/MultiCamApp
@@ -32,9 +32,13 @@ jobs:
           # Copy Info.plist
           cp Info.plist Payload/MultiCamApp.app/Info.plist
           
-          # Create PkgInfo required by iOS runtime
+          # Create PkgInfo
           echo -n "APPL????" > Payload/MultiCamApp.app/PkgInfo
+
+          # Apply ad-hoc codesign so Sideloadly can replace it
+          codesign --force --deep --sign - Payload/MultiCamApp.app
           
+          # Package into IPA
           zip -r -y MultiCamApp.ipa Payload
 
       - name: Upload IPA Artifact
