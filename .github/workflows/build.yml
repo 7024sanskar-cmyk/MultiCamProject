@@ -1,0 +1,33 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Compile for iOS Device
+        run: |
+          xcrun swift build -c release \
+            --triple arm64-apple-ios16.0 \
+            --sdk $(xcrun --sdk iphoneos --show-sdk-path)
+
+      - name: Package into IPA
+        run: |
+          mkdir -p Payload/MultiCamApp.app
+          cp .build/arm64-apple-ios16.0/release/MultiCamApp Payload/MultiCamApp.app/MultiCamApp
+          cp Info.plist Payload/MultiCamApp.app/Info.plist
+          zip -r MultiCamApp.ipa Payload
+
+      - name: Upload IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MultiCamApp-IPA
+          path: MultiCamApp.ipa

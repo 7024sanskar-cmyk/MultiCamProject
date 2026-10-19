@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleExecutable</key>
+    <string>MultiCamApp</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.local.multicam</string>
+    <key>CFBundleName</key>
+    <string>MultiCamApp</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>LSRequiresIPhoneOS</key>
+    <true/>
+    <key>UILaunchScreen</key>
+    <dict/>
+    <key>UISupportedInterfaceOrientations</key>
+    <array>
+        <string>UIInterfaceOrientationPortrait</string>
+    </array>
+    <key>NSCameraUsageDescription</key>
+    <string>Required to record dual cameras simultaneously.</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>Required to record audio for videos.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Required to save recordings to your Photos library.</string>
+</dict>
+</plist>
