@@ -15,8 +15,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
     let backPreviewView = PreviewView()
     let frontPreviewView = PreviewView()
     
-    private let backDataOutput = AVCaptureVideoDataOutput()
-    private let frontDataOutput = AVCaptureVideoDataOutput()
+    private var backDataOutput: AVCaptureVideoDataOutput?
+    private var frontDataOutput: AVCaptureVideoDataOutput?
     
     private var backAssetWriter: AVAssetWriter?
     private var frontAssetWriter: AVAssetWriter?
@@ -56,7 +56,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         sessionQueue.async {
             guard AVCaptureMultiCamSession.isMultiCamSupported else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Multi-cam capture not supported on this iPhone."
+                    self.statusMessage = "Multi-cam not supported on this iPhone."
                 }
                 return
             }
@@ -64,80 +64,95 @@ class MultiCamRecorder: NSObject, ObservableObject {
             self.session.beginConfiguration()
             defer { self.session.commitConfiguration() }
             
-            // 1. Setup Back Camera
+            // 1. Back Camera Configuration
             guard let backDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-                  let backInput = try? AVCaptureDeviceInput(device: backDevice) else {
+                  let backInput = try? AVCaptureDeviceInput(device: backDevice),
+                  self.session.canAddInput(backInput) else {
                 DispatchQueue.main.async { self.statusMessage = "Failed to load back camera." }
                 return
             }
+            self.session.addInputWithNoConnections(backInput)
             
-            if self.session.canAddInput(backInput) {
-                self.session.addInputWithNoConnections(backInput)
-            }
-            
-            // Safe port retrieval (no forced unwrap)
-            let backPorts = backInput.ports.filter { $0.mediaType == .video }
-            guard let backPort = backPorts.first else {
-                DispatchQueue.main.async { self.statusMessage = "No video port on back camera." }
+            // Find back video port
+            guard let backVideoPort = backInput.ports.first(where: { $0.mediaType == .video }) else {
+                DispatchQueue.main.async { self.statusMessage = "No back camera video port." }
                 return
             }
             
-            let backPreviewConnection = AVCaptureConnection(inputPort: backPort, videoPreviewLayer: self.backPreviewView.videoPreviewLayer)
+            // Connect Back Preview Layer Safely
+            DispatchQueue.main.sync {
+                self.backPreviewView.videoPreviewLayer.setSessionWithNoConnection(self.session)
+            }
+            let backPreviewConnection = AVCaptureConnection(inputPort: backVideoPort, videoPreviewLayer: self.backPreviewView.videoPreviewLayer)
             if self.session.canAddConnection(backPreviewConnection) {
                 self.session.addConnection(backPreviewConnection)
             }
             
-            if self.session.canAddOutput(self.backDataOutput) {
-                self.session.addOutputWithNoConnections(self.backDataOutput)
+            // Back Data Output (for recording)
+            let bOutput = AVCaptureVideoDataOutput()
+            bOutput.alwaysDiscardsLateVideoFrames = true
+            bOutput.setSampleBufferDelegate(self, queue: self.dataOutputQueue)
+            if self.session.canAddOutput(bOutput) {
+                self.session.addOutputWithNoConnections(bOutput)
+                self.backDataOutput = bOutput
             }
-            self.backDataOutput.setSampleBufferDelegate(self, queue: self.dataOutputQueue)
             
-            let backDataConnection = AVCaptureConnection(inputPorts: [backPort], output: self.backDataOutput)
+            let backDataConnection = AVCaptureConnection(inputPorts: [backVideoPort], output: bOutput)
             if self.session.canAddConnection(backDataConnection) {
                 self.session.addConnection(backDataConnection)
-                backDataConnection.videoOrientation = .portrait
+                if backDataConnection.isVideoOrientationSupported {
+                    backDataConnection.videoOrientation = .portrait
+                }
             }
             
-            // 2. Setup Front Camera
+            // 2. Front Camera Configuration
             guard let frontDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
-                  let frontInput = try? AVCaptureDeviceInput(device: frontDevice) else {
+                  let frontInput = try? AVCaptureDeviceInput(device: frontDevice),
+                  self.session.canAddInput(frontInput) else {
                 DispatchQueue.main.async { self.statusMessage = "Failed to load front camera." }
                 return
             }
+            self.session.addInputWithNoConnections(frontInput)
             
-            if self.session.canAddInput(frontInput) {
-                self.session.addInputWithNoConnections(frontInput)
-            }
-            
-            let frontPorts = frontInput.ports.filter { $0.mediaType == .video }
-            guard let frontPort = frontPorts.first else {
-                DispatchQueue.main.async { self.statusMessage = "No video port on front camera." }
+            // Find front video port
+            guard let frontVideoPort = frontInput.ports.first(where: { $0.mediaType == .video }) else {
+                DispatchQueue.main.async { self.statusMessage = "No front camera video port." }
                 return
             }
             
-            let frontPreviewConnection = AVCaptureConnection(inputPort: frontPort, videoPreviewLayer: self.frontPreviewView.videoPreviewLayer)
+            // Connect Front Preview Layer Safely
+            DispatchQueue.main.sync {
+                self.frontPreviewView.videoPreviewLayer.setSessionWithNoConnection(self.session)
+            }
+            let frontPreviewConnection = AVCaptureConnection(inputPort: frontVideoPort, videoPreviewLayer: self.frontPreviewView.videoPreviewLayer)
             if self.session.canAddConnection(frontPreviewConnection) {
                 self.session.addConnection(frontPreviewConnection)
+                if frontPreviewConnection.isVideoMirroringSupported {
+                    frontPreviewConnection.isVideoMirrored = true
+                }
             }
             
-            if self.session.canAddOutput(self.frontDataOutput) {
-                self.session.addOutputWithNoConnections(self.frontDataOutput)
+            // Front Data Output (for recording)
+            let fOutput = AVCaptureVideoDataOutput()
+            fOutput.alwaysDiscardsLateVideoFrames = true
+            fOutput.setSampleBufferDelegate(self, queue: self.dataOutputQueue)
+            if self.session.canAddOutput(fOutput) {
+                self.session.addOutputWithNoConnections(fOutput)
+                self.frontDataOutput = fOutput
             }
-            self.frontDataOutput.setSampleBufferDelegate(self, queue: self.dataOutputQueue)
             
-            let frontDataConnection = AVCaptureConnection(inputPorts: [frontPort], output: self.frontDataOutput)
+            let frontDataConnection = AVCaptureConnection(inputPorts: [frontVideoPort], output: fOutput)
             if self.session.canAddConnection(frontDataConnection) {
                 self.session.addConnection(frontDataConnection)
-                frontDataConnection.videoOrientation = .portrait
+                if frontDataConnection.isVideoOrientationSupported {
+                    frontDataConnection.videoOrientation = .portrait
+                }
                 if frontDataConnection.isVideoMirroringSupported {
                     frontDataConnection.isVideoMirrored = true
                 }
             }
             
-            // Bind Preview Layers
             DispatchQueue.main.async {
-                self.backPreviewView.videoPreviewLayer.session = self.session
-                self.frontPreviewView.videoPreviewLayer.session = self.session
                 self.backPreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
                 self.frontPreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
                 self.statusMessage = ""
@@ -191,7 +206,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
                     self.statusMessage = "Recording..."
                 }
             } catch {
-                print("Writer initialization error: \(error)")
+                print("Writer error: \(error)")
             }
         }
     }
