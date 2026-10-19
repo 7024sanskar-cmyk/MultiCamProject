@@ -6,7 +6,7 @@ import UIKit
 class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
-    @Published var statusMessage = ""
+    @Published var statusMessage = "Initializing..."
     
     let session = AVCaptureMultiCamSession()
     private let sessionQueue = DispatchQueue(label: "multicam.session.queue")
@@ -29,19 +29,26 @@ class MultiCamRecorder: NSObject, ObservableObject {
     
     override init() {
         super.init()
-        checkPermissionsAndSetup()
     }
     
-    private func checkPermissionsAndSetup() {
+    func startCameraSetup() {
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             setupSession()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
-                if granted { self.setupSession() }
+                if granted {
+                    self.setupSession()
+                } else {
+                    DispatchQueue.main.async {
+                        self.statusMessage = "Camera access denied in Settings."
+                    }
+                }
             }
         default:
-            DispatchQueue.main.async { self.statusMessage = "Camera permission denied." }
+            DispatchQueue.main.async {
+                self.statusMessage = "Camera access denied in Settings."
+            }
         }
     }
     
@@ -49,7 +56,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         sessionQueue.async {
             guard AVCaptureMultiCamSession.isMultiCamSupported else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Multi-cam not supported on this device."
+                    self.statusMessage = "Multi-cam capture not supported on this iPhone."
                 }
                 return
             }
@@ -57,13 +64,23 @@ class MultiCamRecorder: NSObject, ObservableObject {
             self.session.beginConfiguration()
             defer { self.session.commitConfiguration() }
             
-            // 1. Back Camera
+            // 1. Setup Back Camera
             guard let backDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back),
-                  let backInput = try? AVCaptureDeviceInput(device: backDevice),
-                  self.session.canAddInput(backInput) else { return }
-            self.session.addInputWithNoConnections(backInput)
+                  let backInput = try? AVCaptureDeviceInput(device: backDevice) else {
+                DispatchQueue.main.async { self.statusMessage = "Failed to load back camera." }
+                return
+            }
             
-            guard let backPort = backInput.ports(for: .video, sourceDeviceType: backDevice.deviceType, sourceDevicePosition: .back).first else { return }
+            if self.session.canAddInput(backInput) {
+                self.session.addInputWithNoConnections(backInput)
+            }
+            
+            // Safe port retrieval (no forced unwrap)
+            let backPorts = backInput.ports.filter { $0.mediaType == .video }
+            guard let backPort = backPorts.first else {
+                DispatchQueue.main.async { self.statusMessage = "No video port on back camera." }
+                return
+            }
             
             let backPreviewConnection = AVCaptureConnection(inputPort: backPort, videoPreviewLayer: self.backPreviewView.videoPreviewLayer)
             if self.session.canAddConnection(backPreviewConnection) {
@@ -81,13 +98,22 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 backDataConnection.videoOrientation = .portrait
             }
             
-            // 2. Front Camera
+            // 2. Setup Front Camera
             guard let frontDevice = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front),
-                  let frontInput = try? AVCaptureDeviceInput(device: frontDevice),
-                  self.session.canAddInput(frontInput) else { return }
-            self.session.addInputWithNoConnections(frontInput)
+                  let frontInput = try? AVCaptureDeviceInput(device: frontDevice) else {
+                DispatchQueue.main.async { self.statusMessage = "Failed to load front camera." }
+                return
+            }
             
-            guard let frontPort = frontInput.ports(for: .video, sourceDeviceType: frontDevice.deviceType, sourceDevicePosition: .front).first else { return }
+            if self.session.canAddInput(frontInput) {
+                self.session.addInputWithNoConnections(frontInput)
+            }
+            
+            let frontPorts = frontInput.ports.filter { $0.mediaType == .video }
+            guard let frontPort = frontPorts.first else {
+                DispatchQueue.main.async { self.statusMessage = "No video port on front camera." }
+                return
+            }
             
             let frontPreviewConnection = AVCaptureConnection(inputPort: frontPort, videoPreviewLayer: self.frontPreviewView.videoPreviewLayer)
             if self.session.canAddConnection(frontPreviewConnection) {
@@ -108,15 +134,19 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 }
             }
             
+            // Bind Preview Layers
             DispatchQueue.main.async {
                 self.backPreviewView.videoPreviewLayer.session = self.session
                 self.frontPreviewView.videoPreviewLayer.session = self.session
                 self.backPreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
                 self.frontPreviewView.videoPreviewLayer.videoGravity = .resizeAspectFill
+                self.statusMessage = ""
             }
             
             self.session.startRunning()
-            DispatchQueue.main.async { self.isRunning = self.session.isRunning }
+            DispatchQueue.main.async {
+                self.isRunning = self.session.isRunning
+            }
         }
     }
     

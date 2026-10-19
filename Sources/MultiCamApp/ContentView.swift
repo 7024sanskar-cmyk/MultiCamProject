@@ -45,5 +45,8 @@ struct ContentView: View {
                 .padding(.bottom, 30)
             }
         }
+        .onAppear {
+            recorder.startCameraSetup()
+        }
     }
 }
