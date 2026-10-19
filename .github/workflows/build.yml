@@ -23,7 +23,7 @@ jobs:
           #import <Foundation/Foundation.h>
           NS_ASSUME_NONNULL_BEGIN
           @interface ObjCExceptionCatcher : NSObject
-          + (BOOL)tryExecute:(void(NS_NOESCAPE ^)(void))tryBlock error:(NSError * _Nullable * _Nullable)error;
+          + (BOOL)tryExecute:(void(NS_NOESCAPE ^)(void))tryBlock error:(NSError * _Nullable * _Nullable)error __attribute__((swift_error(none)));
           @end
           NS_ASSUME_NONNULL_END
           EOF
@@ -57,7 +57,7 @@ jobs:
             -c build_obj/ObjCExceptionCatcher.m \
             -o build_obj/ObjCExceptionCatcher.o
 
-          # 3. Compile Swift sources & link Objective-C object
+          # 3. Compile Swift sources (ignoring any stray ObjC files in Sources)
           xcrun -sdk iphoneos swiftc \
             -target arm64-apple-ios16.0 \
             -sdk "$SDK_PATH" \
