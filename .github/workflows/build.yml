@@ -22,7 +22,9 @@ jobs:
       - name: Package into IPA
         run: |
           mkdir -p Payload/MultiCamApp.app
-          cp .build/arm64-apple-ios16.0/release/MultiCamApp Payload/MultiCamApp.app/MultiCamApp
+          BINARY_PATH=$(find .build -type f -name MultiCamApp -not -path "*/.build/*.build/*" | head -n 1)
+          echo "Found binary at: $BINARY_PATH"
+          cp "$BINARY_PATH" Payload/MultiCamApp.app/MultiCamApp
           cp Info.plist Payload/MultiCamApp.app/Info.plist
           zip -r MultiCamApp.ipa Payload
 
