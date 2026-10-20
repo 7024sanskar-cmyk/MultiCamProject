@@ -83,10 +83,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
     @Published var isTorchOn = false
-    @Published var selectedCameras: [AvailableCamera] = [.mainWide, .front] {
-        didSet { restartSession() }
-    }
-    @Published var statusMessage = "Configuring Lenses..."
+    @Published var selectedCameras: [AvailableCamera] = [.mainWide, .telephoto]
+    @Published var activeCameraCount: Int = 2
+    @Published var statusMessage = "Starting Cameras..."
 
     let session = AVCaptureMultiCamSession()
     private let sessionQueue = DispatchQueue(label: "multicam.session.queue")
@@ -105,35 +104,99 @@ class MultiCamRecorder: NSObject, ObservableObject {
     private let recorder2 = SingleStreamRecorder(name: "Stream_2")
     private let recorder3 = SingleStreamRecorder(name: "Stream_3")
 
-    private var isConfigured = false
+    private var isConfiguring = false
 
-    override init() { super.init() }
+    override init() {
+        super.init()
+    }
 
     func startCameraSetup() {
-        guard !isConfigured else { return }
-        previewView1.videoPreviewLayer.setSessionWithNoConnection(session)
-        previewView2.videoPreviewLayer.setSessionWithNoConnection(session)
-        previewView3.videoPreviewLayer.setSessionWithNoConnection(session)
-
-        previewView1.videoPreviewLayer.videoGravity = .resizeAspectFill
-        previewView2.videoPreviewLayer.videoGravity = .resizeAspectFill
-        previewView3.videoPreviewLayer.videoGravity = .resizeAspectFill
+        DispatchQueue.main.async {
+            self.previewView1.videoPreviewLayer.videoGravity = .resizeAspectFill
+            self.previewView2.videoPreviewLayer.videoGravity = .resizeAspectFill
+            self.previewView3.videoPreviewLayer.videoGravity = .resizeAspectFill
+        }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized: setupSession()
+        case .authorized:
+            applyCameraSelection()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
-                if granted { self.setupSession() }
-                else { DispatchQueue.main.async { self.statusMessage = "Camera permission denied." } }
+                if granted {
+                    self.applyCameraSelection()
+                } else {
+                    DispatchQueue.main.async { self.statusMessage = "Camera permission denied." }
+                }
             }
-        default: DispatchQueue.main.async { self.statusMessage = "Camera permission denied." }
+        default:
+            DispatchQueue.main.async { self.statusMessage = "Camera permission denied in Settings." }
         }
     }
 
-    private func restartSession() {
+    func applyCameraSelection() {
         sessionQueue.async {
-            self.session.stopRunning()
-            self.setupSession()
+            guard !self.isConfiguring else { return }
+            self.isConfiguring = true
+
+            guard AVCaptureMultiCamSession.isMultiCamSupported else {
+                DispatchQueue.main.async {
+                    self.statusMessage = "MultiCam not supported on this device."
+                    self.isConfiguring = false
+                }
+                return
+            }
+
+            if self.session.isRunning {
+                self.session.stopRunning()
+            }
+
+            var objcError: NSError?
+            let success = ObjCExceptionCatcher.tryExecute({
+                self.session.beginConfiguration()
+
+                // Remove existing inputs and outputs safely
+                for input in self.session.inputs { self.session.removeInput(input) }
+                for output in self.session.outputs { self.session.removeOutput(output) }
+
+                self.output1 = nil
+                self.output2 = nil
+                self.output3 = nil
+
+                let camerasToConfigure = Array(self.selectedCameras.prefix(3))
+                let previewLayers = [
+                    self.previewView1.videoPreviewLayer,
+                    self.previewView2.videoPreviewLayer,
+                    self.previewView3.videoPreviewLayer
+                ]
+
+                var count = 0
+                for (index, camChoice) in camerasToConfigure.enumerated() {
+                    let layer = previewLayers[index]
+                    if let out = self.addCameraSafe(choice: camChoice, previewLayer: layer) {
+                        if index == 0 { self.output1 = out }
+                        else if index == 1 { self.output2 = out }
+                        else if index == 2 { self.output3 = out }
+                        count += 1
+                    }
+                }
+
+                self.session.commitConfiguration()
+                self.session.startRunning()
+
+                DispatchQueue.main.async {
+                    self.activeCameraCount = count
+                    self.isRunning = self.session.isRunning
+                    self.statusMessage = "Active Cameras: \(count)"
+                    self.isConfiguring = false
+                }
+            }, error: &objcError)
+
+            if !success, let err = objcError {
+                DispatchQueue.main.async {
+                    self.statusMessage = "Error: \(err.localizedDescription)"
+                    self.isConfiguring = false
+                }
+            }
         }
     }
 
@@ -155,7 +218,12 @@ class MultiCamRecorder: NSObject, ObservableObject {
     private func configureCameraFormat(for device: AVCaptureDevice, targetWidth: Int32, targetHeight: Int32, targetFps: Int32) -> Bool {
         let multiCamFormats = device.formats.filter { $0.isMultiCamSupported }
         guard !multiCamFormats.isEmpty else { return false }
-        let matching = multiCamFormats.filter { CMVideoFormatDescriptionGetDimensions($0.formatDescription).width == targetWidth && CMVideoFormatDescriptionGetDimensions($0.formatDescription).height == targetHeight }
+
+        let matching = multiCamFormats.filter {
+            let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+            return dims.width == targetWidth && dims.height == targetHeight
+        }
+
         guard let chosen = matching.first ?? multiCamFormats.first else { return false }
         do {
             try device.lockForConfiguration()
@@ -167,7 +235,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         } catch { return false }
     }
 
-    private func addCamera(choice: AvailableCamera, previewLayer: AVCaptureVideoPreviewLayer) -> (AVCaptureVideoDataOutput, Int32, Int32)? {
+    private func addCameraSafe(choice: AvailableCamera, previewLayer: AVCaptureVideoPreviewLayer) -> AVCaptureVideoDataOutput? {
         var device: AVCaptureDevice?
         var position: AVCaptureDevice.Position = .back
         var targetW: Int32 = 1920
@@ -179,6 +247,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             targetW = 3840; targetH = 2160
         case .mainWide:
             device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            position = .back
         case .ultraWide:
             device = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
         case .front:
@@ -192,12 +261,18 @@ class MultiCamRecorder: NSObject, ObservableObject {
         let mirror = (position == .front)
         guard configureCameraFormat(for: camDev, targetWidth: targetW, targetHeight: targetH, targetFps: 30),
               let input = try? AVCaptureDeviceInput(device: camDev), session.canAddInput(input) else { return nil }
-        
+
         session.addInputWithNoConnections(input)
 
-        guard let port = input.ports(for: .video, sourceDeviceType: camDev.deviceType, sourceDevicePosition: position).first ?? input.ports.first(where: { $0.mediaType == .video }) else {
+        guard let port = input.ports(for: .video, sourceDeviceType: camDev.deviceType, sourceDevicePosition: position).first
+                ?? input.ports.first(where: { $0.mediaType == .video }) else {
             session.removeInput(input)
             return nil
+        }
+
+        // Connect preview layer safely without deadlock
+        DispatchQueue.main.sync {
+            previewLayer.setSessionWithNoConnection(self.session)
         }
 
         let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: previewLayer)
@@ -216,41 +291,10 @@ class MultiCamRecorder: NSObject, ObservableObject {
             if session.canAddConnection(dataConn) {
                 session.addConnection(dataConn)
                 if mirror && dataConn.isVideoMirroringSupported { dataConn.isVideoMirrored = true }
-                return (dataOutput, targetW, targetH)
+                return dataOutput
             }
         }
         return nil
-    }
-
-    private func setupSession() {
-        let layers = [previewView1.videoPreviewLayer, previewView2.videoPreviewLayer, previewView3.videoPreviewLayer]
-        let cameras = Array(selectedCameras.prefix(3))
-
-        sessionQueue.async {
-            guard AVCaptureMultiCamSession.isMultiCamSupported else { return }
-            var objcError: NSError?
-            _ = ObjCExceptionCatcher.tryExecute({
-                self.session.beginConfiguration()
-                for input in self.session.inputs { self.session.removeInput(input) }
-                for output in self.session.outputs { self.session.removeOutput(output) }
-
-                self.output1 = nil; self.output2 = nil; self.output3 = nil
-
-                if cameras.indices.contains(0) {
-                    if let (out, _, _) = self.addCamera(choice: cameras[0], previewLayer: layers[0]) { self.output1 = out }
-                }
-                if cameras.indices.contains(1) {
-                    if let (out, _, _) = self.addCamera(choice: cameras[1], previewLayer: layers[1]) { self.output2 = out }
-                }
-                if cameras.indices.contains(2) {
-                    if let (out, _, _) = self.addCamera(choice: cameras[2], previewLayer: layers[2]) { self.output3 = out }
-                }
-
-                self.session.commitConfiguration()
-                self.session.startRunning()
-                DispatchQueue.main.async { self.isConfigured = true; self.isRunning = self.session.isRunning; self.statusMessage = "Ready" }
-            }, error: &objcError)
-        }
     }
 
     func startRecording() {
@@ -283,7 +327,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
     func stopRecording() {
         dataOutputQueue.async {
-            guard !self.isRecording else { return }
+            guard self.isRecording else { return }
             self.isRecording = false
             DispatchQueue.main.async { self.statusMessage = "Saving inside app..." }
 

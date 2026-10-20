@@ -9,32 +9,43 @@ struct CameraViewRepresentable: UIViewRepresentable {
 struct ContentView: View {
     @StateObject private var recorder = MultiCamRecorder()
     @State private var showLensPicker = false
+    @State private var tempSelectedCameras: [AvailableCamera] = [.mainWide, .telephoto]
 
     var body: some View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
 
+            // Dynamic Stacked Viewfinders based on activeCameraCount
             let activeCameras = Array(recorder.selectedCameras.prefix(3))
             VStack(spacing: 3) {
                 if activeCameras.indices.contains(0) {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView1).clipped()
-                        Text(activeCameras[0].rawValue.uppercased()).font(.caption2.bold()).foregroundColor(.white).padding(5).background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Text(activeCameras[0].rawValue.uppercased())
+                            .font(.caption2.bold()).foregroundColor(.white).padding(5)
+                            .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
                 if activeCameras.indices.contains(1) {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView2).clipped()
-                        Text(activeCameras[1].rawValue.uppercased()).font(.caption2.bold()).foregroundColor(.white).padding(5).background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Text(activeCameras[1].rawValue.uppercased())
+                            .font(.caption2.bold()).foregroundColor(.white).padding(5)
+                            .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
 
                 if activeCameras.indices.contains(2) {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView3).clipped()
-                        Text(activeCameras[2].rawValue.uppercased()).font(.caption2.bold()).foregroundColor(.white).padding(5).background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
-                    }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                        Text(activeCameras[2].rawValue.uppercased())
+                            .font(.caption2.bold()).foregroundColor(.white).padding(5)
+                            .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
 
@@ -55,7 +66,10 @@ struct ContentView: View {
 
                         Spacer()
 
-                        Button(action: { showLensPicker = true }) {
+                        Button(action: {
+                            tempSelectedCameras = recorder.selectedCameras
+                            showLensPicker = true
+                        }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "camera.badge.ellipsis")
                                 Text("SELECT LENSES (\(activeCameras.count))").font(.caption2.bold())
@@ -99,32 +113,42 @@ struct ContentView: View {
         .sheet(isPresented: $showLensPicker) {
             NavigationView {
                 List {
-                    Section(header: Text("Choose up to 3 Lenses to Stream/Record")) {
+                    Section(header: Text("Choose 2 or 3 Lenses")) {
                         ForEach(AvailableCamera.allCases) { cam in
                             HStack {
                                 Text(cam.rawValue)
                                 Spacer()
-                                if recorder.selectedCameras.contains(cam) {
+                                if tempSelectedCameras.contains(cam) {
                                     Image(systemName: "checkmark.circle.fill").foregroundColor(.blue)
                                 }
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                if recorder.selectedCameras.contains(cam) {
-                                    if recorder.selectedCameras.count > 1 {
-                                        recorder.selectedCameras.removeAll { $0 == cam }
+                                if tempSelectedCameras.contains(cam) {
+                                    if tempSelectedCameras.count > 1 {
+                                        tempSelectedCameras.removeAll { $0 == cam }
                                     }
                                 } else {
-                                    if recorder.selectedCameras.count < 3 {
-                                        recorder.selectedCameras.append(cam)
+                                    if tempSelectedCameras.count < 3 {
+                                        tempSelectedCameras.append(cam)
                                     }
                                 }
                             }
                         }
                     }
                 }
-                .navigationTitle("Custom Lens Picker")
-                .navigationBarItems(trailing: Button("Done") { showLensPicker = false })
+                .navigationTitle("Lens Selection")
+                .navigationBarItems(
+                    leading: Button("Cancel") {
+                        showLensPicker = false
+                    },
+                    trailing: Button("Apply") {
+                        recorder.selectedCameras = tempSelectedCameras
+                        recorder.applyCameraSelection()
+                        showLensPicker = false
+                    }
+                    .font(.headline)
+                )
             }
         }
         .onAppear {
