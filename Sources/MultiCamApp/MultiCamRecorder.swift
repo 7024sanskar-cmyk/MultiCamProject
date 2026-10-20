@@ -11,6 +11,11 @@ enum AvailableCamera: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
+enum StreamResolution: String, CaseIterable {
+    case res1080p = "1080p"
+    case res4K = "4K"
+}
+
 class SingleStreamRecorder {
     let name: String
     private var writer: AVAssetWriter?
@@ -27,7 +32,7 @@ class SingleStreamRecorder {
         self.outputURL = url
         self.isSessionStarted = false
 
-        let bitrate = (width == 3840) ? 30_000_000 : 10_000_000
+        let bitrate = (width >= 3840) ? 30_000_000 : 10_000_000
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: width,
@@ -84,6 +89,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRecording = false
     @Published var isTorchOn = false
     @Published var selectedCameras: [AvailableCamera] = [.mainWide, .telephoto]
+    @Published var selectedResolution: StreamResolution = .res1080p
     @Published var activeCameraCount: Int = 2
     @Published var statusMessage = "Starting Cameras..."
 
@@ -133,6 +139,12 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
+    func toggleResolution() {
+        guard !isRecording else { return }
+        selectedResolution = (selectedResolution == .res1080p) ? .res4K : .res1080p
+        applyCameraSelection()
+    }
+
     func applyCameraSelection() {
         sessionQueue.async {
             guard !self.isConfiguring else { return }
@@ -154,7 +166,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
             let success = ObjCExceptionCatcher.tryExecute({
                 self.session.beginConfiguration()
 
-                // Remove existing inputs and outputs safely
                 for input in self.session.inputs { self.session.removeInput(input) }
                 for output in self.session.outputs { self.session.removeOutput(output) }
 
@@ -186,14 +197,14 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 DispatchQueue.main.async {
                     self.activeCameraCount = count
                     self.isRunning = self.session.isRunning
-                    self.statusMessage = "Active Cameras: \(count)"
+                    self.statusMessage = "Active: \(count) Lenses | Target: \(self.selectedResolution.rawValue)"
                     self.isConfiguring = false
                 }
             }, error: &objcError)
 
             if !success, let err = objcError {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Error: \(err.localizedDescription)"
+                    self.statusMessage = "ISP Limit: \(err.localizedDescription)"
                     self.isConfiguring = false
                 }
             }
@@ -238,16 +249,23 @@ class MultiCamRecorder: NSObject, ObservableObject {
     private func addCameraSafe(choice: AvailableCamera, previewLayer: AVCaptureVideoPreviewLayer) -> AVCaptureVideoDataOutput? {
         var device: AVCaptureDevice?
         var position: AVCaptureDevice.Position = .back
+        
+        // Base resolution is 1080p, elevated to 4K if preferred and supported
         var targetW: Int32 = 1920
         var targetH: Int32 = 1080
 
         switch choice {
         case .telephoto:
             device = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back)
-            targetW = 3840; targetH = 2160
+            if selectedResolution == .res4K {
+                targetW = 3840; targetH = 2160
+            }
         case .mainWide:
             device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
             position = .back
+            if selectedResolution == .res4K && selectedCameras.count <= 2 {
+                targetW = 3840; targetH = 2160
+            }
         case .ultraWide:
             device = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
         case .front:
@@ -270,7 +288,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
             return nil
         }
 
-        // Connect preview layer safely without deadlock
         DispatchQueue.main.sync {
             previewLayer.setSessionWithNoConnection(self.session)
         }
@@ -303,24 +320,24 @@ class MultiCamRecorder: NSObject, ObservableObject {
             let cameras = Array(self.selectedCameras.prefix(3))
             var startedAny = false
 
-            if cameras.indices.contains(0) {
-                let w = (cameras[0] == .telephoto) ? 3840 : 1920
-                let h = (cameras[0] == .telephoto) ? 2160 : 1080
-                if self.output1 != nil { if self.recorder1.prepare(width: w, height: h) { startedAny = true } }
-            }
-            if cameras.indices.contains(1) {
-                let w = (cameras[1] == .telephoto) ? 3840 : 1920
-                let h = (cameras[1] == .telephoto) ? 2160 : 1080
-                if self.output2 != nil { if self.recorder2.prepare(width: w, height: h) { startedAny = true } }
-            }
-            if cameras.indices.contains(2) {
-                let w = (cameras[2] == .telephoto) ? 3840 : 1920
-                let h = (cameras[2] == .telephoto) ? 2160 : 1080
-                if self.output3 != nil { if self.recorder3.prepare(width: w, height: h) { startedAny = true } }
+            for (index, cam) in cameras.enumerated() {
+                var w = 1920
+                var h = 1080
+                if self.selectedResolution == .res4K && (cam == .telephoto || (cam == .mainWide && cameras.count <= 2)) {
+                    w = 3840; h = 2160
+                }
+
+                if index == 0 && self.output1 != nil {
+                    if self.recorder1.prepare(width: w, height: h) { startedAny = true }
+                } else if index == 1 && self.output2 != nil {
+                    if self.recorder2.prepare(width: w, height: h) { startedAny = true }
+                } else if index == 2 && self.output3 != nil {
+                    if self.recorder3.prepare(width: w, height: h) { startedAny = true }
+                }
             }
 
             if startedAny {
-                DispatchQueue.main.async { self.isRecording = true; self.statusMessage = "Recording..." }
+                DispatchQueue.main.async { self.isRecording = true; self.statusMessage = "Recording (\(self.selectedResolution.rawValue))..." }
             }
         }
     }
@@ -329,7 +346,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         dataOutputQueue.async {
             guard self.isRecording else { return }
             self.isRecording = false
-            DispatchQueue.main.async { self.statusMessage = "Saving inside app..." }
+            DispatchQueue.main.async { self.statusMessage = "Saving..." }
 
             let group = DispatchGroup()
             var url1: URL?
@@ -343,7 +360,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
             group.notify(queue: .main) {
                 let allURLs = [url1, url2, url3].compactMap { $0 }
-                self.statusMessage = "Saved \(allURLs.count) videos securely inside app!"
+                self.statusMessage = "Saved \(allURLs.count) videos (\(self.selectedResolution.rawValue))!"
             }
         }
     }

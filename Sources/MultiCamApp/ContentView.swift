@@ -15,15 +15,19 @@ struct ContentView: View {
         ZStack {
             Color.black.edgesIgnoringSafeArea(.all)
 
-            // Dynamic Stacked Viewfinders based on activeCameraCount
+            // Dynamic Stacked Viewfinders
             let activeCameras = Array(recorder.selectedCameras.prefix(3))
             VStack(spacing: 3) {
                 if activeCameras.indices.contains(0) {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView1).clipped()
-                        Text(activeCameras[0].rawValue.uppercased())
-                            .font(.caption2.bold()).foregroundColor(.white).padding(5)
-                            .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
+                        HStack {
+                            Text(activeCameras[0].rawValue.uppercased())
+                            Spacer()
+                            Text(recorder.selectedResolution == .res4K && activeCameras[0] == .telephoto ? "4K" : "1080P")
+                        }
+                        .font(.caption2.bold()).foregroundColor(.white).padding(5)
+                        .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -31,9 +35,13 @@ struct ContentView: View {
                 if activeCameras.indices.contains(1) {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView2).clipped()
-                        Text(activeCameras[1].rawValue.uppercased())
-                            .font(.caption2.bold()).foregroundColor(.white).padding(5)
-                            .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
+                        HStack {
+                            Text(activeCameras[1].rawValue.uppercased())
+                            Spacer()
+                            Text(recorder.selectedResolution == .res4K && activeCameras[1] == .telephoto ? "4K" : "1080P")
+                        }
+                        .font(.caption2.bold()).foregroundColor(.white).padding(5)
+                        .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -41,9 +49,13 @@ struct ContentView: View {
                 if activeCameras.indices.contains(2) {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView3).clipped()
-                        Text(activeCameras[2].rawValue.uppercased())
-                            .font(.caption2.bold()).foregroundColor(.white).padding(5)
-                            .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
+                        HStack {
+                            Text(activeCameras[2].rawValue.uppercased())
+                            Spacer()
+                            Text("1080P")
+                        }
+                        .font(.caption2.bold()).foregroundColor(.white).padding(5)
+                        .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
@@ -52,30 +64,44 @@ struct ContentView: View {
             // Controls Overlay
             VStack {
                 VStack(spacing: 8) {
-                    HStack {
+                    HStack(spacing: 8) {
+                        // Flash Button
                         Button(action: { recorder.toggleTorch() }) {
                             HStack(spacing: 4) {
                                 Image(systemName: recorder.isTorchOn ? "bolt.fill" : "bolt.slash.fill")
-                                Text(recorder.isTorchOn ? "FLASH" : "NO FLASH").font(.caption2.bold())
+                                Text(recorder.isTorchOn ? "ON" : "OFF").font(.caption2.bold())
                             }
                             .foregroundColor(recorder.isTorchOn ? .black : .white)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .padding(.horizontal, 9).padding(.vertical, 7)
                             .background(recorder.isTorchOn ? Color.yellow : Color.black.opacity(0.75))
                             .cornerRadius(8)
                         }
 
                         Spacer()
 
+                        // Resolution Button (Toggles between 1080p and 4K)
+                        Button(action: { recorder.toggleResolution() }) {
+                            HStack(spacing: 4) {
+                                Image(systemName: "film.fill")
+                                Text(recorder.selectedResolution.rawValue).font(.caption2.bold())
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .background(recorder.selectedResolution == .res4K ? Color.purple.opacity(0.85) : Color.gray.opacity(0.75))
+                            .cornerRadius(8)
+                        }
+
+                        // Lens Selector Button
                         Button(action: {
                             tempSelectedCameras = recorder.selectedCameras
                             showLensPicker = true
                         }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "camera.badge.ellipsis")
-                                Text("SELECT LENSES (\(activeCameras.count))").font(.caption2.bold())
+                                Text("LENSES (\(activeCameras.count))").font(.caption2.bold())
                             }
                             .foregroundColor(.white)
-                            .padding(.horizontal, 12).padding(.vertical, 7)
+                            .padding(.horizontal, 10).padding(.vertical, 7)
                             .background(Color.blue.opacity(0.85))
                             .cornerRadius(8)
                         }
@@ -95,6 +121,7 @@ struct ContentView: View {
 
                 Spacer()
 
+                // Shutter Button
                 Button(action: {
                     recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
                 }) {
@@ -139,9 +166,7 @@ struct ContentView: View {
                 }
                 .navigationTitle("Lens Selection")
                 .navigationBarItems(
-                    leading: Button("Cancel") {
-                        showLensPicker = false
-                    },
+                    leading: Button("Cancel") { showLensPicker = false },
                     trailing: Button("Apply") {
                         recorder.selectedCameras = tempSelectedCameras
                         recorder.applyCameraSelection()
