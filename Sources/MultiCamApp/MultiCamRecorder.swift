@@ -69,8 +69,7 @@ class SingleStreamRecorder {
         guard let writer = writer else { completion(nil); return }
         guard isSessionStarted, writer.status == .writing else {
             writer.cancelWriting()
-            self.writer = nil
-            self.input = nil
+            self.writer = nil; self.input = nil
             completion(nil)
             return
         }
@@ -78,8 +77,7 @@ class SingleStreamRecorder {
         let url = self.outputURL
         writer.finishWriting {
             let success = (writer.status == .completed)
-            self.writer = nil
-            self.input = nil
+            self.writer = nil; self.input = nil
             completion(success ? url : nil)
         }
     }
@@ -118,7 +116,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
     }
 
     func startCameraSetup() {
-        // Pre-bind preview layers on main queue before touching hardware session
         DispatchQueue.main.async {
             self.previewView1.videoPreviewLayer.setSessionWithNoConnection(self.session)
             self.previewView2.videoPreviewLayer.setSessionWithNoConnection(self.session)
@@ -213,7 +210,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
             if !success, let err = objcError {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Hardware Failure: \(err.localizedDescription)"
+                    self.statusMessage = "Error: \(err.localizedDescription)"
                     self.isConfiguring = false
                 }
             }
@@ -239,7 +236,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         let multiCamFormats = device.formats.filter { $0.isMultiCamSupported }
         guard !multiCamFormats.isEmpty else { return false }
 
-        // Front Camera: Mandatory low-bandwidth binned 720p format to avoid exceeding hardwareCost 1.0
+        // Front Camera: prioritize 720p binned/standard format to keep ISP cost well under 1.0
         if isFront {
             let front720pBinned = multiCamFormats.filter {
                 let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
@@ -331,6 +328,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 previewConn.videoOrientation = .portrait
             }
             if isFront && previewConn.isVideoMirroringSupported {
+                // Must disable automatic adjustment before setting isVideoMirrored to prevent crash
+                previewConn.automaticallyAdjustsVideoMirroring = false
                 previewConn.isVideoMirrored = true
             }
         }
@@ -345,6 +344,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             if session.canAddConnection(dataConn) {
                 session.addConnection(dataConn)
                 if isFront && dataConn.isVideoMirroringSupported {
+                    dataConn.automaticallyAdjustsVideoMirroring = false
                     dataConn.isVideoMirrored = true
                 }
                 return dataOutput
