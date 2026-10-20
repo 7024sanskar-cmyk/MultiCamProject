@@ -9,7 +9,8 @@ struct CameraViewRepresentable: UIViewRepresentable {
 struct ContentView: View {
     @StateObject private var recorder = MultiCamRecorder()
     @State private var showLensPicker = false
-    @State private var tempSelectedCameras: [AvailableCamera] = [.mainWide, .telephoto]
+    @State private var show4KPicker = false
+    @State private var tempSelectedCameras: [AvailableCamera] = [.mainWide, .front]
 
     var body: some View {
         ZStack {
@@ -24,7 +25,7 @@ struct ContentView: View {
                         HStack {
                             Text(activeCameras[0].rawValue.uppercased())
                             Spacer()
-                            Text(recorder.selectedResolution == .res4K && activeCameras[0] == .telephoto ? "4K" : "1080P")
+                            Text(recorder.lensFor4K == activeCameras[0] ? "4K" : (activeCameras[0] == .front ? "720P" : "1080P"))
                         }
                         .font(.caption2.bold()).foregroundColor(.white).padding(5)
                         .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
@@ -38,7 +39,7 @@ struct ContentView: View {
                         HStack {
                             Text(activeCameras[1].rawValue.uppercased())
                             Spacer()
-                            Text(recorder.selectedResolution == .res4K && activeCameras[1] == .telephoto ? "4K" : "1080P")
+                            Text(recorder.lensFor4K == activeCameras[1] ? "4K" : (activeCameras[1] == .front ? "720P" : "1080P"))
                         }
                         .font(.caption2.bold()).foregroundColor(.white).padding(5)
                         .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
@@ -52,7 +53,7 @@ struct ContentView: View {
                         HStack {
                             Text(activeCameras[2].rawValue.uppercased())
                             Spacer()
-                            Text("1080P")
+                            Text(recorder.lensFor4K == activeCameras[2] ? "4K" : "1080P")
                         }
                         .font(.caption2.bold()).foregroundColor(.white).padding(5)
                         .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
@@ -79,15 +80,16 @@ struct ContentView: View {
 
                         Spacer()
 
-                        // Resolution Button (Toggles between 1080p and 4K)
-                        Button(action: { recorder.toggleResolution() }) {
+                        // 4K Lens Target Selector Button
+                        Button(action: { show4KPicker = true }) {
                             HStack(spacing: 4) {
-                                Image(systemName: "film.fill")
-                                Text(recorder.selectedResolution.rawValue).font(.caption2.bold())
+                                Image(systemName: "sparkles.tv")
+                                Text(recorder.lensFor4K != nil ? "4K: \(recorder.lensFor4K!.rawValue.prefix(5))" : "4K: OFF")
+                                    .font(.caption2.bold())
                             }
                             .foregroundColor(.white)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
-                            .background(recorder.selectedResolution == .res4K ? Color.purple.opacity(0.85) : Color.gray.opacity(0.75))
+                            .padding(.horizontal, 9).padding(.vertical, 7)
+                            .background(recorder.lensFor4K != nil ? Color.purple.opacity(0.85) : Color.gray.opacity(0.75))
                             .cornerRadius(8)
                         }
 
@@ -101,7 +103,7 @@ struct ContentView: View {
                                 Text("LENSES (\(activeCameras.count))").font(.caption2.bold())
                             }
                             .foregroundColor(.white)
-                            .padding(.horizontal, 10).padding(.vertical, 7)
+                            .padding(.horizontal, 9).padding(.vertical, 7)
                             .background(Color.blue.opacity(0.85))
                             .cornerRadius(8)
                         }
@@ -137,6 +139,7 @@ struct ContentView: View {
                 .padding(.bottom, 28)
             }
         }
+        // Sheet 1: Lens Selection
         .sheet(isPresented: $showLensPicker) {
             NavigationView {
                 List {
@@ -174,6 +177,44 @@ struct ContentView: View {
                     }
                     .font(.headline)
                 )
+            }
+        }
+        // Sheet 2: Pick Which Lens Records in 4K
+        .sheet(isPresented: $show4KPicker) {
+            NavigationView {
+                List {
+                    Section(header: Text("Choose ONE Rear Lens for 4K (or disable)")) {
+                        HStack {
+                            Text("No 4K (All 1080p - Lowest Load)")
+                            Spacer()
+                            if recorder.lensFor4K == nil {
+                                Image(systemName: "checkmark.circle.fill").foregroundColor(.purple)
+                            }
+                        }
+                        .contentShape(Rectangle())
+                        .onTapGesture {
+                            recorder.set4KLens(nil)
+                            show4KPicker = false
+                        }
+
+                        ForEach(recorder.selectedCameras.filter { $0 != .front }) { cam in
+                            HStack {
+                                Text("\(cam.rawValue) in 4K")
+                                Spacer()
+                                if recorder.lensFor4K == cam {
+                                    Image(systemName: "checkmark.circle.fill").foregroundColor(.purple)
+                                }
+                            }
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                recorder.set4KLens(cam)
+                                show4KPicker = false
+                            }
+                        }
+                    }
+                }
+                .navigationTitle("4K Lens Selector")
+                .navigationBarItems(trailing: Button("Done") { show4KPicker = false })
             }
         }
         .onAppear {

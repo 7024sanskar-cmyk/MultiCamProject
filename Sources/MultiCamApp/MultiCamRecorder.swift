@@ -11,11 +11,6 @@ enum AvailableCamera: String, CaseIterable, Identifiable {
     var id: String { rawValue }
 }
 
-enum StreamResolution: String, CaseIterable {
-    case res1080p = "1080p"
-    case res4K = "4K"
-}
-
 class SingleStreamRecorder {
     let name: String
     private var writer: AVAssetWriter?
@@ -88,8 +83,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
     @Published var isTorchOn = false
-    @Published var selectedCameras: [AvailableCamera] = [.mainWide, .telephoto]
-    @Published var selectedResolution: StreamResolution = .res1080p
+    @Published var selectedCameras: [AvailableCamera] = [.mainWide, .front]
+    // The specific lens chosen to record in 4K (only applicable to rear cameras)
+    @Published var lensFor4K: AvailableCamera? = nil
     @Published var activeCameraCount: Int = 2
     @Published var statusMessage = "Starting Cameras..."
 
@@ -112,9 +108,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
     private var isConfiguring = false
 
-    override init() {
-        super.init()
-    }
+    override init() { super.init() }
 
     func startCameraSetup() {
         DispatchQueue.main.async {
@@ -128,20 +122,17 @@ class MultiCamRecorder: NSObject, ObservableObject {
             applyCameraSelection()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .video) { granted in
-                if granted {
-                    self.applyCameraSelection()
-                } else {
-                    DispatchQueue.main.async { self.statusMessage = "Camera permission denied." }
-                }
+                if granted { self.applyCameraSelection() }
+                else { DispatchQueue.main.async { self.statusMessage = "Camera permission denied." } }
             }
         default:
             DispatchQueue.main.async { self.statusMessage = "Camera permission denied in Settings." }
         }
     }
 
-    func toggleResolution() {
+    func set4KLens(_ lens: AvailableCamera?) {
         guard !isRecording else { return }
-        selectedResolution = (selectedResolution == .res1080p) ? .res4K : .res1080p
+        lensFor4K = lens
         applyCameraSelection()
     }
 
@@ -152,7 +143,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
             guard AVCaptureMultiCamSession.isMultiCamSupported else {
                 DispatchQueue.main.async {
-                    self.statusMessage = "MultiCam not supported on this device."
+                    self.statusMessage = "MultiCam not supported."
                     self.isConfiguring = false
                 }
                 return
@@ -183,7 +174,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 var count = 0
                 for (index, camChoice) in camerasToConfigure.enumerated() {
                     let layer = previewLayers[index]
-                    if let out = self.addCameraSafe(choice: camChoice, previewLayer: layer) {
+                    let isTarget4K = (self.lensFor4K == camChoice && camChoice != .front)
+                    if let out = self.addCameraSafe(choice: camChoice, previewLayer: layer, want4K: isTarget4K) {
                         if index == 0 { self.output1 = out }
                         else if index == 1 { self.output2 = out }
                         else if index == 2 { self.output3 = out }
@@ -194,10 +186,12 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 self.session.commitConfiguration()
                 self.session.startRunning()
 
+                let cost = Int(self.session.hardwareCost * 100)
                 DispatchQueue.main.async {
                     self.activeCameraCount = count
                     self.isRunning = self.session.isRunning
-                    self.statusMessage = "Active: \(count) Lenses | Target: \(self.selectedResolution.rawValue)"
+                    let fourKName = self.lensFor4K != nil ? "4K: \(self.lensFor4K!.rawValue)" : "All 1080p"
+                    self.statusMessage = "\(count) Active | \(fourKName) (ISP: \(cost)%)"
                     self.isConfiguring = false
                 }
             }, error: &objcError)
@@ -226,46 +220,67 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func configureCameraFormat(for device: AVCaptureDevice, targetWidth: Int32, targetHeight: Int32, targetFps: Int32) -> Bool {
+    private func configureCameraFormat(for device: AVCaptureDevice, isFront: Bool, want4K: Bool) -> Bool {
         let multiCamFormats = device.formats.filter { $0.isMultiCamSupported }
         guard !multiCamFormats.isEmpty else { return false }
 
-        let matching = multiCamFormats.filter {
-            let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
-            return dims.width == targetWidth && dims.height == targetHeight
+        // Rule: Front camera MUST use binned 720p or low-cost format to prevent ISP blow-up
+        if isFront {
+            let front720pBinned = multiCamFormats.filter {
+                let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                return dims.width == 1280 && dims.height == 720 && $0.isVideoBinned
+            }
+            let frontFallback = multiCamFormats.filter {
+                let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+                return dims.width == 1280 && dims.height == 720
+            }
+            guard let chosen = front720pBinned.first ?? frontFallback.first ?? multiCamFormats.first else { return false }
+            do {
+                try device.lockForConfiguration()
+                device.activeFormat = chosen
+                device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+                device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
+                device.unlockForConfiguration()
+                return true
+            } catch { return false }
         }
 
-        guard let chosen = matching.first ?? multiCamFormats.first else { return false }
+        // Rear Cameras: 4K or 1080p
+        let targetW: Int32 = want4K ? 3840 : 1920
+        let targetH: Int32 = want4K ? 2160 : 1080
+
+        let exactMatching = multiCamFormats.filter {
+            let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+            return dims.width == targetW && dims.height == targetH
+        }
+
+        // Fallback to 1080p if 4K is not supported in multicam mode on this specific lens
+        let fallback1080p = multiCamFormats.filter {
+            let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
+            return dims.width == 1920 && dims.height == 1080
+        }
+
+        guard let chosen = exactMatching.first ?? fallback1080p.first ?? multiCamFormats.first else { return false }
         do {
             try device.lockForConfiguration()
             device.activeFormat = chosen
-            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: targetFps)
-            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: targetFps)
+            device.activeVideoMinFrameDuration = CMTime(value: 1, timescale: 30)
+            device.activeVideoMaxFrameDuration = CMTime(value: 1, timescale: 30)
             device.unlockForConfiguration()
             return true
         } catch { return false }
     }
 
-    private func addCameraSafe(choice: AvailableCamera, previewLayer: AVCaptureVideoPreviewLayer) -> AVCaptureVideoDataOutput? {
+    private func addCameraSafe(choice: AvailableCamera, previewLayer: AVCaptureVideoPreviewLayer, want4K: Bool) -> AVCaptureVideoDataOutput? {
         var device: AVCaptureDevice?
         var position: AVCaptureDevice.Position = .back
-        
-        // Base resolution is 1080p, elevated to 4K if preferred and supported
-        var targetW: Int32 = 1920
-        var targetH: Int32 = 1080
 
         switch choice {
         case .telephoto:
             device = AVCaptureDevice.default(.builtInTelephotoCamera, for: .video, position: .back)
-            if selectedResolution == .res4K {
-                targetW = 3840; targetH = 2160
-            }
         case .mainWide:
             device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
             position = .back
-            if selectedResolution == .res4K && selectedCameras.count <= 2 {
-                targetW = 3840; targetH = 2160
-            }
         case .ultraWide:
             device = AVCaptureDevice.default(.builtInUltraWideCamera, for: .video, position: .back)
         case .front:
@@ -276,8 +291,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
         guard let camDev = device else { return nil }
         if choice == .mainWide { self.mainWideDevice = camDev }
 
-        let mirror = (position == .front)
-        guard configureCameraFormat(for: camDev, targetWidth: targetW, targetHeight: targetH, targetFps: 30),
+        let isFront = (position == .front)
+        guard configureCameraFormat(for: camDev, isFront: isFront, want4K: want4K),
               let input = try? AVCaptureDeviceInput(device: camDev), session.canAddInput(input) else { return nil }
 
         session.addInputWithNoConnections(input)
@@ -296,7 +311,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         if session.canAddConnection(previewConn) {
             session.addConnection(previewConn)
             if previewConn.isVideoOrientationSupported { previewConn.videoOrientation = .portrait }
-            if mirror && previewConn.isVideoMirroringSupported { previewConn.isVideoMirrored = true }
+            if isFront && previewConn.isVideoMirroringSupported { previewConn.isVideoMirrored = true }
         }
 
         let dataOutput = AVCaptureVideoDataOutput()
@@ -307,7 +322,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             let dataConn = AVCaptureConnection(inputPorts: [port], output: dataOutput)
             if session.canAddConnection(dataConn) {
                 session.addConnection(dataConn)
-                if mirror && dataConn.isVideoMirroringSupported { dataConn.isVideoMirrored = true }
+                if isFront && dataConn.isVideoMirroringSupported { dataConn.isVideoMirrored = true }
                 return dataOutput
             }
         }
@@ -323,7 +338,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             for (index, cam) in cameras.enumerated() {
                 var w = 1920
                 var h = 1080
-                if self.selectedResolution == .res4K && (cam == .telephoto || (cam == .mainWide && cameras.count <= 2)) {
+                if cam == .front {
+                    w = 1280; h = 720
+                } else if self.lensFor4K == cam {
                     w = 3840; h = 2160
                 }
 
@@ -337,7 +354,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             }
 
             if startedAny {
-                DispatchQueue.main.async { self.isRecording = true; self.statusMessage = "Recording (\(self.selectedResolution.rawValue))..." }
+                DispatchQueue.main.async { self.isRecording = true; self.statusMessage = "Recording..." }
             }
         }
     }
@@ -360,7 +377,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
             group.notify(queue: .main) {
                 let allURLs = [url1, url2, url3].compactMap { $0 }
-                self.statusMessage = "Saved \(allURLs.count) videos (\(self.selectedResolution.rawValue))!"
+                self.statusMessage = "Saved \(allURLs.count) videos securely inside app!"
             }
         }
     }
