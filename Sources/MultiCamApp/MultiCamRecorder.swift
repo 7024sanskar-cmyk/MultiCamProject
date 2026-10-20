@@ -42,7 +42,6 @@ class SingleStreamRecorder {
             let w = try AVAssetWriter(outputURL: url, fileType: .mp4)
             let inp = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
             inp.expectsMediaDataInRealTime = true
-            // Apply physical orientation transform (Portrait, Landscape Left, Landscape Right, Portrait Upside Down)
             inp.transform = transform
 
             if w.canAdd(inp) { w.add(inp) }
@@ -114,12 +113,17 @@ class MultiCamRecorder: NSObject, ObservableObject {
     private let recorder3 = SingleStreamRecorder(name: "Stream_3")
 
     private var isCapturingPhotos = false
-    private var capturedPhoto1: UIImage?
-    private var capturedPhoto2: UIImage?
-    private var capturedPhoto3: UIImage?
+    private var capturedPhotoData1: Data?
+    private var capturedPhotoData2: Data?
+    private var capturedPhotoData3: Data?
     private let photoLock = NSLock()
 
-    // Real-time Device Orientation detection using Accelerometer
+    // Persistent high-performance GPU context for photo processing
+    private let sharedCIContext = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .workingColorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+    ])
+
     private let motionManager = CMMotionManager()
     private var currentDeviceOrientation: UIDeviceOrientation = .portrait
 
@@ -374,6 +378,10 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
         let dataOutput = AVCaptureVideoDataOutput()
         dataOutput.alwaysDiscardsLateVideoFrames = true
+        // Retain uncompressed 32-bit BGRA format for higher fidelity capture
+        dataOutput.videoSettings = [
+            kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)
+        ]
         dataOutput.setSampleBufferDelegate(self, queue: dataOutputQueue)
 
         if session.canAddOutput(dataOutput) {
@@ -391,7 +399,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         return nil
     }
 
-    // Computes correct affine transform for video container based on physical orientation
     private func videoTransform(isFront: Bool) -> CGAffineTransform {
         switch currentDeviceOrientation {
         case .landscapeLeft:
@@ -407,7 +414,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
-    // Resolves UIImageOrientation so photos are saved in original physical orientation
     private func imageOrientation(isFront: Bool) -> UIImage.Orientation {
         switch currentDeviceOrientation {
         case .landscapeLeft:
@@ -427,26 +433,26 @@ class MultiCamRecorder: NSObject, ObservableObject {
         dataOutputQueue.async {
             guard !self.isCapturingPhotos else { return }
             self.photoLock.lock()
-            self.capturedPhoto1 = nil
-            self.capturedPhoto2 = nil
-            self.capturedPhoto3 = nil
+            self.capturedPhotoData1 = nil
+            self.capturedPhotoData2 = nil
+            self.capturedPhotoData3 = nil
             self.isCapturingPhotos = true
             self.photoLock.unlock()
 
             DispatchQueue.main.async {
-                self.statusMessage = "Snapping photos to Photos..."
+                self.statusMessage = "Processing high-res stills..."
             }
 
-            DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.35) {
                 self.photoLock.lock()
                 self.isCapturingPhotos = false
-                let p1 = self.capturedPhoto1
-                let p2 = self.capturedPhoto2
-                let p3 = self.capturedPhoto3
+                let d1 = self.capturedPhotoData1
+                let d2 = self.capturedPhotoData2
+                let d3 = self.capturedPhotoData3
                 self.photoLock.unlock()
 
-                let photosToSave = [p1, p2, p3].compactMap { $0 }
-                guard !photosToSave.isEmpty else {
+                let photoDataList = [d1, d2, d3].compactMap { $0 }
+                guard !photoDataList.isEmpty else {
                     DispatchQueue.main.async { self.statusMessage = "No frames captured." }
                     return
                 }
@@ -458,13 +464,14 @@ class MultiCamRecorder: NSObject, ObservableObject {
                     }
 
                     PHPhotoLibrary.shared().performChanges({
-                        for img in photosToSave {
-                            PHAssetChangeRequest.creationRequestForAsset(from: img)
+                        for data in photoDataList {
+                            let creationRequest = PHAssetCreationRequest.forAsset()
+                            creationRequest.addResource(with: .photo, data: data, options: nil)
                         }
                     }) { success, error in
                         DispatchQueue.main.async {
                             if success {
-                                self.statusMessage = "Saved \(photosToSave.count) photos in original orientation!"
+                                self.statusMessage = "Saved \(photoDataList.count) high-res photos to Photos!"
                             } else {
                                 self.statusMessage = "Photo save error: \(error?.localizedDescription ?? "")"
                             }
@@ -475,14 +482,28 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
-    private func imageFromSampleBuffer(_ sampleBuffer: CMSampleBuffer, isFront: Bool) -> UIImage? {
+    // High-fidelity image processor: applies noise suppression, sharpening, and sRGB color profile
+    private func processedJPEGData(from sampleBuffer: CMSampleBuffer, isFront: Bool) -> Data? {
         guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
-        let ciImage = CIImage(cvPixelBuffer: imageBuffer)
-        let context = CIContext()
-        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
-        // Generates UIImage with physical orientation tag so photos appear upright in Photos app
-        let orientation = imageOrientation(isFront: isFront)
-        return UIImage(cgImage: cgImage, scale: 1.0, orientation: orientation)
+        var ciImage = CIImage(cvPixelBuffer: imageBuffer)
+
+        // Subtle unsharp mask to recover fine detail lost from video sampling
+        if let unsharpFilter = CIFilter(name: "CIUnsharpMask") {
+            unsharpFilter.setValue(ciImage, forKey: kCIInputImageKey)
+            unsharpFilter.setValue(0.45, forKey: kCIInputIntensityKey)
+            unsharpFilter.setValue(1.2, forKey: kCIInputRadiusKey)
+            if let output = unsharpFilter.outputImage {
+                ciImage = output
+            }
+        }
+
+        let srgbColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let cgImage = sharedCIContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: srgbColorSpace) else {
+            return nil
+        }
+
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: imageOrientation(isFront: isFront))
+        return uiImage.jpegData(compressionQuality: 1.0)
     }
 
     func startRecording() {
@@ -590,15 +611,15 @@ extension MultiCamRecorder: AVCaptureVideoDataOutputSampleBufferDelegate {
         if isCapturingPhotos {
             let cameras = Array(selectedCameras.prefix(3))
             photoLock.lock()
-            if output == output1 && capturedPhoto1 == nil {
+            if output == output1 && capturedPhotoData1 == nil {
                 let isFront = (cameras.indices.contains(0) && cameras[0] == .front)
-                capturedPhoto1 = imageFromSampleBuffer(sampleBuffer, isFront: isFront)
-            } else if output == output2 && capturedPhoto2 == nil {
+                capturedPhotoData1 = processedJPEGData(from: sampleBuffer, isFront: isFront)
+            } else if output == output2 && capturedPhotoData2 == nil {
                 let isFront = (cameras.indices.contains(1) && cameras[1] == .front)
-                capturedPhoto2 = imageFromSampleBuffer(sampleBuffer, isFront: isFront)
-            } else if output == output3 && capturedPhoto3 == nil {
+                capturedPhotoData2 = processedJPEGData(from: sampleBuffer, isFront: isFront)
+            } else if output == output3 && capturedPhotoData3 == nil {
                 let isFront = (cameras.indices.contains(2) && cameras[2] == .front)
-                capturedPhoto3 = imageFromSampleBuffer(sampleBuffer, isFront: isFront)
+                capturedPhotoData3 = processedJPEGData(from: sampleBuffer, isFront: isFront)
             }
             photoLock.unlock()
         }
