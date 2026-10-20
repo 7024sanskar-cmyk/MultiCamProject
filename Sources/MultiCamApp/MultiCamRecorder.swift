@@ -87,7 +87,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isRunning = false
     @Published var isRecording = false
     @Published var isTorchOn = false
-    @Published var selectedCameras: [AvailableCamera] = [.mainWide, .front]
+    @Published var selectedCameras: [AvailableCamera] = [.telephoto, .mainWide]
     @Published var lensFor4K: AvailableCamera? = nil
     @Published var activeCameraCount: Int = 2
     @Published var statusMessage = "Starting Cameras..."
@@ -210,7 +210,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
             if !success, let err = objcError {
                 DispatchQueue.main.async {
-                    self.statusMessage = "Error: \(err.localizedDescription)"
+                    self.statusMessage = "Hardware Failure: \(err.localizedDescription)"
                     self.isConfiguring = false
                 }
             }
@@ -236,7 +236,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         let multiCamFormats = device.formats.filter { $0.isMultiCamSupported }
         guard !multiCamFormats.isEmpty else { return false }
 
-        // Front Camera: prioritize 720p binned/standard format to keep ISP cost well under 1.0
         if isFront {
             let front720pBinned = multiCamFormats.filter {
                 let dims = CMVideoFormatDescriptionGetDimensions($0.formatDescription)
@@ -263,7 +262,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
             } catch { return false }
         }
 
-        // Rear Cameras: 4K (3840x2160) or standard 1080p
         let targetW: Int32 = want4K ? 3840 : 1920
         let targetH: Int32 = want4K ? 2160 : 1080
 
@@ -320,20 +318,21 @@ class MultiCamRecorder: NSObject, ObservableObject {
             return nil
         }
 
-        // Connect preview layer directly
+        // Configure preview connection
         let previewConn = AVCaptureConnection(inputPort: port, videoPreviewLayer: previewLayer)
         if session.canAddConnection(previewConn) {
             session.addConnection(previewConn)
             if previewConn.isVideoOrientationSupported {
                 previewConn.videoOrientation = .portrait
             }
-            if isFront && previewConn.isVideoMirroringSupported {
-                // Must disable automatic adjustment before setting isVideoMirrored to prevent crash
+            if previewConn.isVideoMirroringSupported {
                 previewConn.automaticallyAdjustsVideoMirroring = false
-                previewConn.isVideoMirrored = true
+                // ONLY mirror front camera. Rear cameras explicitly set to unmirrored.
+                previewConn.isVideoMirrored = isFront
             }
         }
 
+        // Configure data output connection
         let dataOutput = AVCaptureVideoDataOutput()
         dataOutput.alwaysDiscardsLateVideoFrames = true
         dataOutput.setSampleBufferDelegate(self, queue: dataOutputQueue)
@@ -343,9 +342,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             let dataConn = AVCaptureConnection(inputPorts: [port], output: dataOutput)
             if session.canAddConnection(dataConn) {
                 session.addConnection(dataConn)
-                if isFront && dataConn.isVideoMirroringSupported {
+                if dataConn.isVideoMirroringSupported {
                     dataConn.automaticallyAdjustsVideoMirroring = false
-                    dataConn.isVideoMirrored = true
+                    dataConn.isVideoMirrored = isFront
                 }
                 return dataOutput
             }

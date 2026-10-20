@@ -10,7 +10,18 @@ struct ContentView: View {
     @StateObject private var recorder = MultiCamRecorder()
     @State private var showLensPicker = false
     @State private var show4KPicker = false
-    @State private var tempSelectedCameras: [AvailableCamera] = [.mainWide, .front]
+    @State private var tempSelectedCameras: [AvailableCamera] = [.telephoto, .mainWide]
+
+    // Helper to label the screen position of a camera
+    func positionBadge(for index: Int, total: Int) -> String {
+        if total == 2 {
+            return index == 0 ? "TOP" : "BOTTOM"
+        } else {
+            if index == 0 { return "TOP" }
+            else if index == 1 { return "MIDDLE" }
+            else { return "BOTTOM" }
+        }
+    }
 
     var body: some View {
         ZStack {
@@ -23,7 +34,7 @@ struct ContentView: View {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView1).clipped()
                         HStack {
-                            Text(activeCameras[0].rawValue.uppercased())
+                            Text("[\(positionBadge(for: 0, total: activeCameras.count))] \(activeCameras[0].rawValue.uppercased())")
                             Spacer()
                             Text(recorder.lensFor4K == activeCameras[0] ? "4K" : (activeCameras[0] == .front ? "720P" : "1080P"))
                         }
@@ -37,7 +48,7 @@ struct ContentView: View {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView2).clipped()
                         HStack {
-                            Text(activeCameras[1].rawValue.uppercased())
+                            Text("[\(positionBadge(for: 1, total: activeCameras.count))] \(activeCameras[1].rawValue.uppercased())")
                             Spacer()
                             Text(recorder.lensFor4K == activeCameras[1] ? "4K" : (activeCameras[1] == .front ? "720P" : "1080P"))
                         }
@@ -51,7 +62,7 @@ struct ContentView: View {
                     ZStack(alignment: .bottomLeading) {
                         CameraViewRepresentable(previewView: recorder.previewView3).clipped()
                         HStack {
-                            Text(activeCameras[2].rawValue.uppercased())
+                            Text("[\(positionBadge(for: 2, total: activeCameras.count))] \(activeCameras[2].rawValue.uppercased())")
                             Spacer()
                             Text(recorder.lensFor4K == activeCameras[2] ? "4K" : "1080P")
                         }
@@ -80,7 +91,7 @@ struct ContentView: View {
 
                         Spacer()
 
-                        // 4K Lens Target Selector Button
+                        // 4K Target Selector
                         Button(action: { show4KPicker = true }) {
                             HStack(spacing: 4) {
                                 Image(systemName: "sparkles.tv")
@@ -139,24 +150,41 @@ struct ContentView: View {
                 .padding(.bottom, 28)
             }
         }
-        // Sheet 1: Lens Selection
+        // Sheet 1: Lens Selection with explicit Slot Badges (#1 TOP, #2 MIDDLE, #3 BOTTOM)
         .sheet(isPresented: $showLensPicker) {
             NavigationView {
                 List {
-                    Section(header: Text("Choose 2 or 3 Lenses")) {
+                    Section(header: Text("Tap in the order you want them stacked (Max 3)")) {
                         ForEach(AvailableCamera.allCases) { cam in
                             HStack {
                                 Text(cam.rawValue)
+                                    .font(.body)
+
                                 Spacer()
-                                if tempSelectedCameras.contains(cam) {
-                                    Image(systemName: "checkmark.circle.fill").foregroundColor(.blue)
+
+                                if let index = tempSelectedCameras.firstIndex(of: cam) {
+                                    let total = tempSelectedCameras.count
+                                    let badgeText = positionBadge(for: index, total: total)
+                                    
+                                    HStack(spacing: 4) {
+                                        Text("#\(index + 1) \(badgeText)")
+                                            .font(.caption2.bold())
+                                            .foregroundColor(.white)
+                                            .padding(.horizontal, 8)
+                                            .padding(.vertical, 4)
+                                            .background(Color.blue)
+                                            .cornerRadius(6)
+
+                                        Image(systemName: "checkmark.circle.fill")
+                                            .foregroundColor(.blue)
+                                    }
                                 }
                             }
                             .contentShape(Rectangle())
                             .onTapGesture {
-                                if tempSelectedCameras.contains(cam) {
+                                if let existingIndex = tempSelectedCameras.firstIndex(of: cam) {
                                     if tempSelectedCameras.count > 1 {
-                                        tempSelectedCameras.removeAll { $0 == cam }
+                                        tempSelectedCameras.remove(at: existingIndex)
                                     }
                                 } else {
                                     if tempSelectedCameras.count < 3 {
@@ -167,7 +195,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                .navigationTitle("Lens Selection")
+                .navigationTitle("Select & Order Lenses")
                 .navigationBarItems(
                     leading: Button("Cancel") { showLensPicker = false },
                     trailing: Button("Apply") {
@@ -183,7 +211,7 @@ struct ContentView: View {
         .sheet(isPresented: $show4KPicker) {
             NavigationView {
                 List {
-                    Section(header: Text("Choose ONE Rear Lens for 4K (or disable)")) {
+                    Section(header: Text("Choose ONE Rear Lens for 4K")) {
                         HStack {
                             Text("No 4K (All 1080p - Lowest Load)")
                             Spacer()
