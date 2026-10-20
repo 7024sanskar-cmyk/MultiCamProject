@@ -18,7 +18,6 @@ jobs:
           SDK_PATH=$(xcrun --sdk iphoneos --show-sdk-path)
           mkdir -p Payload/MultiCamApp.app build_obj
 
-          # 1. Auto-generate Objective-C Exception Catcher Header & Implementation
           cat << 'EOF' > build_obj/ObjCExceptionCatcher.h
           #import <Foundation/Foundation.h>
           NS_ASSUME_NONNULL_BEGIN
@@ -49,7 +48,6 @@ jobs:
           @end
           EOF
 
-          # 2. Compile Objective-C Exception Catcher
           xcrun -sdk iphoneos clang \
             -target arm64-apple-ios16.0 \
             -isysroot "$SDK_PATH" \
@@ -57,7 +55,6 @@ jobs:
             -c build_obj/ObjCExceptionCatcher.m \
             -o build_obj/ObjCExceptionCatcher.o
 
-          # 3. Compile Swift sources (ignoring any stray ObjC files in Sources)
           xcrun -sdk iphoneos swiftc \
             -target arm64-apple-ios16.0 \
             -sdk "$SDK_PATH" \
@@ -67,14 +64,11 @@ jobs:
             build_obj/ObjCExceptionCatcher.o \
             -o Payload/MultiCamApp.app/MultiCamApp
 
-          # 4. Add Info.plist and PkgInfo
           cp Info.plist Payload/MultiCamApp.app/Info.plist
           echo -n "APPL????" > Payload/MultiCamApp.app/PkgInfo
 
-          # 5. Sign with ad-hoc signature
           codesign --force --deep --sign - Payload/MultiCamApp.app
 
-          # 6. Archive to IPA
           zip -r -y MultiCamApp.ipa Payload
 
       - name: Upload IPA Artifact

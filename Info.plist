@@ -23,12 +23,8 @@
         <string>UIInterfaceOrientationPortrait</string>
     </array>
     <key>NSCameraUsageDescription</key>
-    <string>Required to record triple rear cameras simultaneously.</string>
+    <string>Required to record multiple cameras simultaneously.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Required to record audio for videos.</string>
-    <key>NSPhotoLibraryUsageDescription</key>
-    <string>Required to save your recorded multi-camera videos to Photos.</string>
-    <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>Required to save your recorded multi-camera videos to Photos.</string>
 </dict>
 </plist>
