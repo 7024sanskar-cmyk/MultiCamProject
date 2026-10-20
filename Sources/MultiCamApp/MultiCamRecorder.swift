@@ -2,6 +2,7 @@ import Foundation
 import AVFoundation
 import UIKit
 import CoreImage
+import Photos
 
 enum AvailableCamera: String, CaseIterable, Identifiable {
     case telephoto = "Telephoto"
@@ -22,7 +23,8 @@ class SingleStreamRecorder {
     init(name: String) { self.name = name }
 
     func prepare(width: Int, height: Int) -> Bool {
-        let tempDir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        // Use temporary directory instead of documents
+        let tempDir = FileManager.default.temporaryDirectory
         let url = tempDir.appendingPathComponent("\(name)_\(Int(Date().timeIntervalSince1970))_\(UUID().uuidString.prefix(4)).mp4")
         try? FileManager.default.removeItem(at: url)
         self.outputURL = url
@@ -132,6 +134,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             self.previewView2.videoPreviewLayer.videoGravity = .resizeAspectFill
             self.previewView3.videoPreviewLayer.videoGravity = .resizeAspectFill
         }
+
+        // Pre-request Photos permission upfront
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { _ in }
 
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
@@ -367,7 +372,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             self.photoLock.unlock()
 
             DispatchQueue.main.async {
-                self.statusMessage = "Snapping photos..."
+                self.statusMessage = "Snapping photos to Photos..."
             }
 
             DispatchQueue.global().asyncAfter(deadline: .now() + 0.35) {
@@ -378,24 +383,32 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 let p3 = self.capturedPhoto3
                 self.photoLock.unlock()
 
-                var savedCount = 0
-                let docs = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-                let timestamp = Int(Date().timeIntervalSince1970)
-
                 let photosToSave = [p1, p2, p3].compactMap { $0 }
-                let cameras = Array(self.selectedCameras.prefix(3))
-
-                for (idx, img) in photosToSave.enumerated() {
-                    let camName = idx < cameras.count ? cameras[idx].rawValue.replacingOccurrences(of: " ", with: "") : "Lens\(idx+1)"
-                    let fileURL = docs.appendingPathComponent("Photo_\(camName)_\(timestamp).jpg")
-                    if let data = img.jpegData(compressionQuality: 0.95) {
-                        try? data.write(to: fileURL)
-                        savedCount += 1
-                    }
+                guard !photosToSave.isEmpty else {
+                    DispatchQueue.main.async { self.statusMessage = "No frames captured." }
+                    return
                 }
 
-                DispatchQueue.main.async {
-                    self.statusMessage = "Saved \(savedCount) photos securely inside app!"
+                // Save directly to iOS Photos library without keeping extra cache
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                    guard status == .authorized || status == .limited else {
+                        DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
+                        return
+                    }
+
+                    PHPhotoLibrary.shared().performChanges({
+                        for img in photosToSave {
+                            PHAssetChangeRequest.creationRequestForAsset(from: img)
+                        }
+                    }) { success, error in
+                        DispatchQueue.main.async {
+                            if success {
+                                self.statusMessage = "Saved \(photosToSave.count) photos directly to Photos!"
+                            } else {
+                                self.statusMessage = "Photo save error: \(error?.localizedDescription ?? "")"
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -446,7 +459,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         dataOutputQueue.async {
             guard self.isRecording else { return }
             self.isRecording = false
-            DispatchQueue.main.async { self.statusMessage = "Saving..." }
+            DispatchQueue.main.async { self.statusMessage = "Saving videos to Photos..." }
 
             let group = DispatchGroup()
             var url1: URL?
@@ -460,7 +473,42 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
             group.notify(queue: .main) {
                 let allURLs = [url1, url2, url3].compactMap { $0 }
-                self.statusMessage = "Saved \(allURLs.count) videos inside app!"
+                self.saveVideosAndCleanup(urls: allURLs)
+            }
+        }
+    }
+
+    private func saveVideosAndCleanup(urls: [URL]) {
+        guard !urls.isEmpty else {
+            DispatchQueue.main.async { self.statusMessage = "No video files to save." }
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
+                // Clean up temp files even if permission is rejected
+                for url in urls { try? FileManager.default.removeItem(at: url) }
+                return
+            }
+
+            PHPhotoLibrary.shared().performChanges({
+                for url in urls {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                }
+            }) { success, error in
+                // Delete temporary sandbox files immediately so the app takes 0 MB storage
+                for url in urls {
+                    try? FileManager.default.removeItem(at: url)
+                }
+
+                DispatchQueue.main.async {
+                    if success {
+                        self.statusMessage = "Saved \(urls.count) videos to Photos (Storage Cleared)!"
+                    } else {
+                        self.statusMessage = "Save Error: \(error?.localizedDescription ?? "")"
+                    }
+                }
             }
         }
     }

@@ -26,5 +26,9 @@
     <string>Required to record multiple cameras simultaneously.</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Required to record audio for videos.</string>
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>Required to save videos and photos directly to your Photos library.</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>Required to save videos and photos directly to your Photos library.</string>
 </dict>
 </plist>
