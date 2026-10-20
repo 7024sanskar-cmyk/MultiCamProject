@@ -12,7 +12,6 @@ struct ContentView: View {
     @State private var show4KPicker = false
     @State private var tempSelectedCameras: [AvailableCamera] = [.telephoto, .mainWide]
 
-    // Helper to label the screen position of a camera
     func positionBadge(for index: Int, total: Int) -> String {
         if total == 2 {
             return index == 0 ? "TOP" : "BOTTOM"
@@ -134,23 +133,43 @@ struct ContentView: View {
 
                 Spacer()
 
-                // Shutter Button
-                Button(action: {
-                    recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
-                }) {
-                    ZStack {
-                        Circle().stroke(Color.white, lineWidth: 4).frame(width: 72, height: 72)
-                        if recorder.isRecording {
-                            RoundedRectangle(cornerRadius: 6).fill(Color.red).frame(width: 30, height: 30)
-                        } else {
-                            Circle().fill(Color.red).frame(width: 58, height: 58)
+                // Bottom Action Bar: Video Record Button + Photo Capture Button
+                HStack(spacing: 40) {
+                    // Photo Snapshot Button (Snaps photos across all active lenses)
+                    Button(action: {
+                        recorder.capturePhotos()
+                    }) {
+                        ZStack {
+                            Circle()
+                                .stroke(Color.white, lineWidth: 3)
+                                .frame(width: 52, height: 52)
+                            Circle()
+                                .fill(Color.white)
+                                .frame(width: 42, height: 42)
+                            Image(systemName: "camera.fill")
+                                .font(.system(size: 18))
+                                .foregroundColor(.black)
+                        }
+                    }
+
+                    // Shutter Video Recording Button
+                    Button(action: {
+                        recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
+                    }) {
+                        ZStack {
+                            Circle().stroke(Color.white, lineWidth: 4).frame(width: 72, height: 72)
+                            if recorder.isRecording {
+                                RoundedRectangle(cornerRadius: 6).fill(Color.red).frame(width: 30, height: 30)
+                            } else {
+                                Circle().fill(Color.red).frame(width: 58, height: 58)
+                            }
                         }
                     }
                 }
                 .padding(.bottom, 28)
             }
         }
-        // Sheet 1: Lens Selection with explicit Slot Badges (#1 TOP, #2 MIDDLE, #3 BOTTOM)
+        // Sheet 1: Lens Selection
         .sheet(isPresented: $showLensPicker) {
             NavigationView {
                 List {
