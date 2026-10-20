@@ -1,6 +1,7 @@
 import Foundation
 import AVFoundation
 import UIKit
+import CoreImage
 
 enum AvailableCamera: String, CaseIterable, Identifiable {
     case telephoto = "Telephoto"
