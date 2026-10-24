@@ -10,12 +10,12 @@ struct ContentView: View {
     @StateObject private var recorder = MultiCamRecorder()
     @State private var showLensPicker = false
     @State private var show4KPicker = false
-    @State private var tempSelectedCameras: [AvailableCamera] = [.telephoto, .mainWide]
+    @State private var tempSelectedCameras: [AvailableCamera] = [.mainWide]
 
     func positionBadge(for index: Int, total: Int) -> String {
-        if total == 2 {
-            return index == 0 ? "TOP" : "BOTTOM"
-        } else {
+        if total == 1 { return "FULLSCREEN" }
+        else if total == 2 { return index == 0 ? "TOP" : "BOTTOM" }
+        else {
             if index == 0 { return "TOP" }
             else if index == 1 { return "MIDDLE" }
             else { return "BOTTOM" }
@@ -35,7 +35,8 @@ struct ContentView: View {
                         HStack {
                             Text("[\(positionBadge(for: 0, total: activeCameras.count))] \(activeCameras[0].rawValue.uppercased())")
                             Spacer()
-                            Text(recorder.lensFor4K == activeCameras[0] ? "4K" : (activeCameras[0] == .front ? "720P" : "1080P"))
+                            let is4K = (recorder.lensFor4K == activeCameras[0])
+                            Text(is4K ? "4K \(recorder.targetFps.rawValue)P" : "1080P \(recorder.targetFps.rawValue)P")
                         }
                         .font(.caption2.bold()).foregroundColor(.white).padding(5)
                         .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
@@ -49,7 +50,7 @@ struct ContentView: View {
                         HStack {
                             Text("[\(positionBadge(for: 1, total: activeCameras.count))] \(activeCameras[1].rawValue.uppercased())")
                             Spacer()
-                            Text(recorder.lensFor4K == activeCameras[1] ? "4K" : (activeCameras[1] == .front ? "720P" : "1080P"))
+                            Text(recorder.lensFor4K == activeCameras[1] ? "4K" : "1080P")
                         }
                         .font(.caption2.bold()).foregroundColor(.white).padding(5)
                         .background(Color.black.opacity(0.6)).cornerRadius(4).padding(6)
@@ -88,6 +89,20 @@ struct ContentView: View {
                             .cornerRadius(8)
                         }
 
+                        // FPS Toggle (Enabled in Single Lens Mode: 30fps / 60fps)
+                        if recorder.isSingleLensMode {
+                            Button(action: { recorder.toggleFps() }) {
+                                HStack(spacing: 2) {
+                                    Image(systemName: "speedometer")
+                                    Text("\(recorder.targetFps.rawValue) FPS").font(.caption2.bold())
+                                }
+                                .foregroundColor(.white)
+                                .padding(.horizontal, 8).padding(.vertical, 7)
+                                .background(recorder.targetFps == .fps60 ? Color.orange.opacity(0.85) : Color.gray.opacity(0.75))
+                                .cornerRadius(8)
+                            }
+                        }
+
                         Spacer()
 
                         // 4K Target Selector
@@ -103,18 +118,18 @@ struct ContentView: View {
                             .cornerRadius(8)
                         }
 
-                        // Lens Selector Button
+                        // Lens Mode / Selector Button
                         Button(action: {
                             tempSelectedCameras = recorder.selectedCameras
                             showLensPicker = true
                         }) {
                             HStack(spacing: 4) {
-                                Image(systemName: "camera.badge.ellipsis")
-                                Text("LENSES (\(activeCameras.count))").font(.caption2.bold())
+                                Image(systemName: recorder.isSingleLensMode ? "camera.fill" : "camera.badge.ellipsis")
+                                Text(recorder.isSingleLensMode ? "PRO (1)" : "MULTI (\(activeCameras.count))").font(.caption2.bold())
                             }
                             .foregroundColor(.white)
                             .padding(.horizontal, 9).padding(.vertical, 7)
-                            .background(Color.blue.opacity(0.85))
+                            .background(recorder.isSingleLensMode ? Color.green.opacity(0.85) : Color.blue.opacity(0.85))
                             .cornerRadius(8)
                         }
                     }
@@ -133,9 +148,9 @@ struct ContentView: View {
 
                 Spacer()
 
-                // Bottom Action Bar: Video Record Button + Photo Capture Button
+                // Bottom Action Bar: Photo Button + Video Shutter
                 HStack(spacing: 40) {
-                    // Photo Snapshot Button (Snaps photos across all active lenses)
+                    // Photo Snapshot Button
                     Button(action: {
                         recorder.capturePhotos()
                     }) {
@@ -152,7 +167,7 @@ struct ContentView: View {
                         }
                     }
 
-                    // Shutter Video Recording Button
+                    // Video Record Button
                     Button(action: {
                         recorder.isRecording ? recorder.stopRecording() : recorder.startRecording()
                     }) {
@@ -169,11 +184,11 @@ struct ContentView: View {
                 .padding(.bottom, 28)
             }
         }
-        // Sheet 1: Lens Selection
+        // Sheet 1: Single or Multi-Lens Selection
         .sheet(isPresented: $showLensPicker) {
             NavigationView {
                 List {
-                    Section(header: Text("Tap in the order you want them stacked (Max 3)")) {
+                    Section(header: Text("Choose 1 Lens (Full Pro Capabilities) or 2-3 Lenses (Multi-Cam)")) {
                         ForEach(AvailableCamera.allCases) { cam in
                             HStack {
                                 Text(cam.rawValue)
@@ -186,16 +201,16 @@ struct ContentView: View {
                                     let badgeText = positionBadge(for: index, total: total)
                                     
                                     HStack(spacing: 4) {
-                                        Text("#\(index + 1) \(badgeText)")
+                                        Text(total == 1 ? "PRO (SINGLE)" : "#\(index + 1) \(badgeText)")
                                             .font(.caption2.bold())
                                             .foregroundColor(.white)
                                             .padding(.horizontal, 8)
                                             .padding(.vertical, 4)
-                                            .background(Color.blue)
+                                            .background(total == 1 ? Color.green : Color.blue)
                                             .cornerRadius(6)
 
                                         Image(systemName: "checkmark.circle.fill")
-                                            .foregroundColor(.blue)
+                                            .foregroundColor(total == 1 ? .green : .blue)
                                     }
                                 }
                             }
@@ -214,7 +229,7 @@ struct ContentView: View {
                         }
                     }
                 }
-                .navigationTitle("Select & Order Lenses")
+                .navigationTitle("Select Mode & Lenses")
                 .navigationBarItems(
                     leading: Button("Cancel") { showLensPicker = false },
                     trailing: Button("Apply") {
@@ -226,13 +241,13 @@ struct ContentView: View {
                 )
             }
         }
-        // Sheet 2: Pick Which Lens Records in 4K
+        // Sheet 2: 4K Target Selector
         .sheet(isPresented: $show4KPicker) {
             NavigationView {
                 List {
-                    Section(header: Text("Choose ONE Rear Lens for 4K")) {
+                    Section(header: Text("Choose ONE Lens for 4K")) {
                         HStack {
-                            Text("No 4K (All 1080p - Lowest Load)")
+                            Text("No 4K (Standard 1080p)")
                             Spacer()
                             if recorder.lensFor4K == nil {
                                 Image(systemName: "checkmark.circle.fill").foregroundColor(.purple)
