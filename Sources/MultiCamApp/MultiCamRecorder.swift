@@ -96,7 +96,8 @@ class SingleStreamRecorder {
     }
 }
 
-class MultiCamRecorder: NSObject, ObservableObject {
+// Conform directly on the class declaration to prevent scope resolution failures
+class MultiCamRecorder: NSObject, ObservableObject, AVCapturePhotoCaptureDelegate, AVCaptureVideoDataOutputSampleBufferDelegate {
     @Published var isRunning = false
     @Published var isRecording = false
     @Published var isTorchOn = false
@@ -604,7 +605,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
                     return
                 }
 
-                PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { (status: PHAuthorizationStatus) in
                     guard status == .authorized || status == .limited else {
                         DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
                         return
@@ -615,7 +616,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
                             let creationRequest = PHAssetCreationRequest.forAsset()
                             creationRequest.addResource(with: .photo, data: data, options: nil)
                         }
-                    }) { success, error in
+                    }, completionHandler: { (success: Bool, error: Error?) in
                         DispatchQueue.main.async {
                             if success {
                                 self.statusMessage = "Saved \(photoDataList.count) photos directly to Photos!"
@@ -623,7 +624,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
                                 self.statusMessage = "Photo save error: \(error?.localizedDescription ?? "")"
                             }
                         }
-                    }
+                    })
                 }
             }
         }
@@ -718,7 +719,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             return
         }
 
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { (status: PHAuthorizationStatus) in
             guard status == .authorized || status == .limited else {
                 DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
                 for url in urls { try? FileManager.default.removeItem(at: url) }
@@ -729,9 +730,66 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 for url in urls {
                     PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
                 }
-            }) { success, error in
+            }, completionHandler: { (success: Bool, error: Error?) in
                 for url in urls {
                     try? FileManager.default.removeItem(at: url)
                 }
 
-                DispatchQueue.main.async
+                DispatchQueue.main.async {
+                    if success {
+                        self.statusMessage = "Saved \(urls.count) video(s) to Photos!"
+                    } else {
+                        self.statusMessage = "Save Error: \(error?.localizedDescription ?? "")"
+                    }
+                }
+            })
+        }
+    }
+
+    // AVCapturePhotoCaptureDelegate implementation
+    func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
+        guard error == nil, let photoData = photo.fileDataRepresentation() else {
+            DispatchQueue.main.async { self.statusMessage = "Photo Capture Error" }
+            return
+        }
+
+        let isFront = (selectedCameras.first == .front)
+        guard let sourceImage = UIImage(data: photoData) else { return }
+        let correctedImage = UIImage(cgImage: sourceImage.cgImage!, scale: 1.0, orientation: imageOrientation(isFront: isFront))
+        guard let finalData = correctedImage.jpegData(compressionQuality: 1.0) else { return }
+
+        PHPhotoLibrary.shared().performChanges({
+            let req = PHAssetCreationRequest.forAsset()
+            req.addResource(with: .photo, data: finalData, options: nil)
+        }, completionHandler: { (success: Bool, error: Error?) in
+            DispatchQueue.main.async {
+                self.statusMessage = success ? "Full-Res Native Photo Saved!" : "Photo Save Failed"
+            }
+        })
+    }
+
+    // AVCaptureVideoDataOutputSampleBufferDelegate implementation
+    func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
+        if isRecording {
+            if output == output1 { recorder1.append(sampleBuffer) }
+            else if output == output2 { recorder2.append(sampleBuffer) }
+            else if output == output3 { recorder3.append(sampleBuffer) }
+        }
+
+        if isCapturingMultiPhotos && !isSingleLensMode {
+            let cameras = Array(selectedCameras.prefix(3))
+            photoLock.lock()
+            if output == output1 && capturedPhotoData1 == nil {
+                let isFront = (cameras.indices.contains(0) && cameras[0] == .front)
+                capturedPhotoData1 = processedJPEGData(from: sampleBuffer, isFront: isFront)
+            } else if output == output2 && capturedPhotoData2 == nil {
+                let isFront = (cameras.indices.contains(1) && cameras[1] == .front)
+                capturedPhotoData2 = processedJPEGData(from: sampleBuffer, isFront: isFront)
+            } else if output == output3 && capturedPhotoData3 == nil {
+                let isFront = (cameras.indices.contains(2) && cameras[2] == .front)
+                capturedPhotoData3 = processedJPEGData(from: sampleBuffer, isFront: isFront)
+            }
+            photoLock.unlock()
+        }
+    }
+}
