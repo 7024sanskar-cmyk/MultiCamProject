@@ -80,7 +80,8 @@ class SingleStreamRecorder {
         guard let writer = writer else { completion(nil); return }
         guard isSessionStarted, writer.status == .writing else {
             writer.cancelWriting()
-            self.writer = nil; self.input = nil
+            self.writer = nil
+            self.input = nil
             completion(nil)
             return
         }
@@ -88,7 +89,8 @@ class SingleStreamRecorder {
         let url = self.outputURL
         writer.finishWriting {
             let success = (writer.status == .completed)
-            self.writer = nil; self.input = nil
+            self.writer = nil
+            self.input = nil
             completion(success ? url : nil)
         }
     }
@@ -105,9 +107,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
     @Published var isSingleLensMode: Bool = true
     @Published var statusMessage = "Starting Camera..."
 
-    // Multi-Cam hardware session for 2-3 cameras
     private let multiCamSession = AVCaptureMultiCamSession()
-    // Standard unconstrained session for Single Lens Pro Mode
     private let singleCamSession = AVCaptureSession()
 
     private let sessionQueue = DispatchQueue(label: "multicam.session.queue", qos: .userInitiated)
@@ -208,9 +208,8 @@ class MultiCamRecorder: NSObject, ObservableObject {
 
     func toggleFps() {
         guard !isRecording else { return }
-        // 60fps is strictly supported only in Single Lens mode due to Apple ISP multi-cam limits
         if selectedCameras.count == 1 {
-            targetFps = (targetFps == .fps30) ? .fps60 : .fps30
+            targetFps = (targetFps == FpsOption.fps30) ? FpsOption.fps60 : FpsOption.fps30
             applyCameraSelection()
         }
     }
@@ -221,7 +220,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
             self.isConfiguring = true
 
             if self.selectedCameras.count > 1 {
-                self.targetFps = .fps30
+                self.targetFps = FpsOption.fps30
             }
 
             let isSingle = (self.selectedCameras.count == 1)
@@ -240,9 +239,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
-    // ==========================================
-    // MARK: - Single Lens Pro Mode (Full Hardware Power)
-    // ==========================================
     private func setupSingleLensPipeline() {
         guard let choice = selectedCameras.first else { self.isConfiguring = false; return }
 
@@ -253,7 +249,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             for input in self.singleCamSession.inputs { self.singleCamSession.removeInput(input) }
             for output in self.singleCamSession.outputs { self.singleCamSession.removeOutput(output) }
 
-            self.output1 = nil; self.output2 = nil; self.output3 = nil
+            self.output1 = nil
+            self.output2 = nil
+            self.output3 = nil
             self.photoOutput = nil
 
             let isFront = (choice == .front)
@@ -262,7 +260,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
             self.activeDevice1 = camDev
             if choice == .mainWide { self.mainWideDevice = camDev }
 
-            // Single lens mode supports true 4K and up to 60fps
             let want4K = (self.lensFor4K == choice && !isFront)
             let reqFps = Int32(self.targetFps.rawValue)
             self.configureSingleCameraFormat(for: camDev, isFront: isFront, want4K: want4K, targetFps: reqFps)
@@ -273,7 +270,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
             }
             self.singleCamSession.addInput(input)
 
-            // Attach full-fidelity native photo output
             let pOut = AVCapturePhotoOutput()
             pOut.isHighResolutionCaptureEnabled = true
             if self.singleCamSession.canAddOutput(pOut) {
@@ -281,7 +277,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
                 self.photoOutput = pOut
             }
 
-            // Video data output for realtime preview recording
             let dataOutput = AVCaptureVideoDataOutput()
             dataOutput.alwaysDiscardsLateVideoFrames = true
             dataOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_32BGRA)]
@@ -295,7 +290,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             DispatchQueue.main.sync {
                 self.previewView1.videoPreviewLayer.session = self.singleCamSession
                 if let conn = self.previewView1.videoPreviewLayer.connection {
-                    if conn.isVideoOrientationSupported { conn.videoOrientation = .portrait }
+                    if conn.isVideoOrientationSupported {
+                        conn.videoOrientation = AVCaptureVideoOrientation.portrait
+                    }
                     if conn.isVideoMirroringSupported {
                         conn.automaticallyAdjustsVideoMirroring = false
                         conn.isVideoMirrored = isFront
@@ -323,9 +320,6 @@ class MultiCamRecorder: NSObject, ObservableObject {
         }
     }
 
-    // ==========================================
-    // MARK: - Multi-Cam Mode (2 to 3 Cameras)
-    // ==========================================
     private func setupMultiCamPipeline() {
         guard AVCaptureMultiCamSession.isMultiCamSupported else {
             DispatchQueue.main.async {
@@ -342,7 +336,9 @@ class MultiCamRecorder: NSObject, ObservableObject {
             for input in self.multiCamSession.inputs { self.multiCamSession.removeInput(input) }
             for output in self.multiCamSession.outputs { self.multiCamSession.removeOutput(output) }
 
-            self.output1 = nil; self.output2 = nil; self.output3 = nil
+            self.output1 = nil
+            self.output2 = nil
+            self.output3 = nil
             self.photoOutput = nil
 
             let camerasToConfigure = Array(self.selectedCameras.prefix(3))
@@ -494,7 +490,7 @@ class MultiCamRecorder: NSObject, ObservableObject {
         if multiCamSession.canAddConnection(previewConn) {
             multiCamSession.addConnection(previewConn)
             if previewConn.isVideoOrientationSupported {
-                previewConn.videoOrientation = .portrait
+                previewConn.videoOrientation = AVCaptureVideoOrientation.portrait
             }
             if previewConn.isVideoMirroringSupported {
                 previewConn.automaticallyAdjustsVideoMirroring = false
@@ -563,4 +559,179 @@ class MultiCamRecorder: NSObject, ObservableObject {
         case .portrait, .unknown, .faceUp, .faceDown:
             fallthrough
         @unknown default:
-            return isFront ? .leftMirrored :
+            return isFront ? .leftMirrored : .right
+        }
+    }
+
+    func capturePhotos() {
+        if isSingleLensMode, let pOut = photoOutput {
+            let settings = AVCapturePhotoSettings(format: [AVVideoCodecKey: AVVideoCodecType.jpeg])
+            settings.isHighResolutionPhotoEnabled = true
+            pOut.capturePhoto(with: settings, delegate: self)
+            DispatchQueue.main.async {
+                self.statusMessage = "Capturing native full-res photo..."
+            }
+        } else {
+            captureMultiCamPhotos()
+        }
+    }
+
+    private func captureMultiCamPhotos() {
+        dataOutputQueue.async {
+            guard !self.isCapturingMultiPhotos else { return }
+            self.photoLock.lock()
+            self.capturedPhotoData1 = nil
+            self.capturedPhotoData2 = nil
+            self.capturedPhotoData3 = nil
+            self.isCapturingMultiPhotos = true
+            self.photoLock.unlock()
+
+            DispatchQueue.main.async {
+                self.statusMessage = "Processing high-res stills..."
+            }
+
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.35) {
+                self.photoLock.lock()
+                self.isCapturingMultiPhotos = false
+                let d1 = self.capturedPhotoData1
+                let d2 = self.capturedPhotoData2
+                let d3 = self.capturedPhotoData3
+                self.photoLock.unlock()
+
+                let photoDataList = [d1, d2, d3].compactMap { $0 }
+                guard !photoDataList.isEmpty else {
+                    DispatchQueue.main.async { self.statusMessage = "No frames captured." }
+                    return
+                }
+
+                PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+                    guard status == .authorized || status == .limited else {
+                        DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
+                        return
+                    }
+
+                    PHPhotoLibrary.shared().performChanges({
+                        for data in photoDataList {
+                            let creationRequest = PHAssetCreationRequest.forAsset()
+                            creationRequest.addResource(with: .photo, data: data, options: nil)
+                        }
+                    }) { success, error in
+                        DispatchQueue.main.async {
+                            if success {
+                                self.statusMessage = "Saved \(photoDataList.count) photos directly to Photos!"
+                            } else {
+                                self.statusMessage = "Photo save error: \(error?.localizedDescription ?? "")"
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func processedJPEGData(from sampleBuffer: CMSampleBuffer, isFront: Bool) -> Data? {
+        guard let imageBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return nil }
+        var ciImage = CIImage(cvPixelBuffer: imageBuffer)
+
+        if let unsharpFilter = CIFilter(name: "CIUnsharpMask") {
+            unsharpFilter.setValue(ciImage, forKey: kCIInputImageKey)
+            unsharpFilter.setValue(0.45, forKey: kCIInputIntensityKey)
+            unsharpFilter.setValue(1.2, forKey: kCIInputRadiusKey)
+            if let output = unsharpFilter.outputImage {
+                ciImage = output
+            }
+        }
+
+        let srgbColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+        guard let cgImage = sharedCIContext.createCGImage(ciImage, from: ciImage.extent, format: .RGBA8, colorSpace: srgbColorSpace) else {
+            return nil
+        }
+
+        let uiImage = UIImage(cgImage: cgImage, scale: 1.0, orientation: imageOrientation(isFront: isFront))
+        return uiImage.jpegData(compressionQuality: 1.0)
+    }
+
+    func startRecording() {
+        dataOutputQueue.async {
+            guard !self.isRecording else { return }
+            let cameras = Array(self.selectedCameras.prefix(3))
+            let fpsVal = self.targetFps.rawValue
+            var startedAny = false
+
+            for (index, cam) in cameras.enumerated() {
+                var w = 1920
+                var h = 1080
+                let isFront = (cam == .front)
+
+                if isFront && !self.isSingleLensMode {
+                    w = 1280; h = 720
+                } else if self.lensFor4K == cam {
+                    w = 3840; h = 2160
+                }
+
+                let transform = self.videoTransform(isFront: isFront)
+
+                if index == 0 && self.output1 != nil {
+                    if self.recorder1.prepare(width: w, height: h, transform: transform, fps: fpsVal) { startedAny = true }
+                } else if index == 1 && self.output2 != nil {
+                    if self.recorder2.prepare(width: w, height: h, transform: transform, fps: 30) { startedAny = true }
+                } else if index == 2 && self.output3 != nil {
+                    if self.recorder3.prepare(width: w, height: h, transform: transform, fps: 30) { startedAny = true }
+                }
+            }
+
+            if startedAny {
+                DispatchQueue.main.async {
+                    self.isRecording = true
+                    self.statusMessage = "Recording (\(self.targetFps.rawValue)fps)..."
+                }
+            }
+        }
+    }
+
+    func stopRecording() {
+        dataOutputQueue.async {
+            guard self.isRecording else { return }
+            self.isRecording = false
+            DispatchQueue.main.async { self.statusMessage = "Saving videos to Photos..." }
+
+            let group = DispatchGroup()
+            var url1: URL?
+            var url2: URL?
+            var url3: URL?
+
+            let cameras = Array(self.selectedCameras.prefix(3))
+            if cameras.indices.contains(0) { group.enter(); self.recorder1.finish { url1 = $0; group.leave() } }
+            if cameras.indices.contains(1) { group.enter(); self.recorder2.finish { url2 = $0; group.leave() } }
+            if cameras.indices.contains(2) { group.enter(); self.recorder3.finish { url3 = $0; group.leave() } }
+
+            group.notify(queue: .main) {
+                let allURLs = [url1, url2, url3].compactMap { $0 }
+                self.saveVideosAndCleanup(urls: allURLs)
+            }
+        }
+    }
+
+    private func saveVideosAndCleanup(urls: [URL]) {
+        guard !urls.isEmpty else {
+            DispatchQueue.main.async { self.statusMessage = "No video files to save." }
+            return
+        }
+
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                DispatchQueue.main.async { self.statusMessage = "Photos permission denied." }
+                for url in urls { try? FileManager.default.removeItem(at: url) }
+                return
+            }
+
+            PHPhotoLibrary.shared().performChanges({
+                for url in urls {
+                    PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: url)
+                }
+            }) { success, error in
+                for url in urls {
+                    try? FileManager.default.removeItem(at: url)
+                }
+
+                DispatchQueue.main.async
